@@ -1,7 +1,8 @@
 <div align="center">
   <img src="sone.png" alt="SONE" width="150">
   <h1>SONE</h1>
-  <p>The native desktop client for <a href="https://tidal.com">TIDAL</a> on Linux. Lossless streaming with bit-perfect ALSA output up to 24-bit/192kHz (MAX) — your DAC, not your browser's resampler.</p>
+  <p>The native desktop client for <a href="https://tidal.com">TIDAL</a> on Linux (and now Windows !). Lossless streaming with bit-perfect ALSA (WASAPI exclusive on Windows) output up to 24-bit/192kHz (MAX) — your DAC, not your browser's resampler. </p>
+  <p>⚠️ Ported with help from AI agents</p>
 
   [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
   [![Platform: Linux](https://img.shields.io/badge/Platform-Linux-yellow.svg)]()
