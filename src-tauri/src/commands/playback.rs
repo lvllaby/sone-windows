@@ -159,6 +159,8 @@ pub async fn stop_track(state: State<'_, AppState>) -> Result<(), SoneError> {
     let result = state.audio_player.stop().map_err(SoneError::Audio);
     #[cfg(target_os = "linux")]
     state.mpris.send(crate::mpris::MprisCommand::Stop);
+    #[cfg(target_os = "windows")]
+    state.smtc.stop();
     state.discord.send(crate::discord::DiscordCommand::Stop);
     state.scrobble_manager.on_track_stopped().await;
     result
@@ -279,6 +281,14 @@ pub fn update_mpris_metadata(
         content_created: metadata.content_created.clone(),
         user_rating: metadata.user_rating,
     });
+    #[cfg(target_os = "windows")]
+    state.smtc.update_metadata(
+        &metadata.title,
+        &metadata.artist,
+        &metadata.album,
+        &metadata.art_url,
+        metadata.duration_secs,
+    );
     state
         .discord
         .send(crate::discord::DiscordCommand::SetMetadata {
@@ -304,6 +314,8 @@ pub fn update_mpris_playback_status(
     state
         .mpris
         .send(crate::mpris::MprisCommand::SetPlaybackStatus { is_playing });
+    #[cfg(target_os = "windows")]
+    state.smtc.set_playback_status(is_playing);
     state
         .discord
         .send(crate::discord::DiscordCommand::SetPlaying {

@@ -10,6 +10,8 @@ mod error;
 mod idle_inhibit;
 #[cfg(target_os = "linux")]
 mod mpris;
+#[cfg(target_os = "windows")]
+mod media_controls;
 mod scrobble;
 #[cfg(target_os = "linux")]
 mod tray;
@@ -194,6 +196,8 @@ pub struct AppState {
     pub last_peak_amplitude: AtomicU64,
     #[cfg(target_os = "linux")]
     pub mpris: mpris::MprisHandle,
+    #[cfg(target_os = "windows")]
+    pub smtc: media_controls::WindowsMediaHandle,
     pub scrobble_manager: scrobble::ScrobbleManager,
     pub discord: discord::DiscordHandle,
     pub idle_inhibitor: Mutex<idle_inhibit::IdleInhibitor>,
@@ -330,7 +334,9 @@ impl AppState {
             last_replay_gain: AtomicU64::new(f64::NAN.to_bits()),
             last_peak_amplitude: AtomicU64::new(f64::NAN.to_bits()),
             #[cfg(target_os = "linux")]
-            mpris: mpris::MprisHandle::new(app_handle),
+            mpris: mpris::MprisHandle::new(app_handle.clone()),
+            #[cfg(target_os = "windows")]
+            smtc: media_controls::WindowsMediaHandle::new(app_handle.clone()),
             scrobble_manager,
             discord: discord_handle,
             idle_inhibitor: Mutex::new(idle_inhibit::IdleInhibitor::new()),
@@ -413,7 +419,6 @@ pub fn run() {
             )?;
             // Deep link: register tidal:// scheme handler
             app.handle().plugin(tauri_plugin_deep_link::init())?;
-            #[cfg(target_os = "linux")]
             if let Err(e) = app.deep_link().register_all() {
                 log::warn!("Deep link registration failed: {e}");
             }

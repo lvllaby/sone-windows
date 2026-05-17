@@ -57,6 +57,7 @@ enum PlaybackBackend {
         norm_volume_el: Option<gst::Element>,
     },
     /// Exclusive/Bit-perfect: GStreamer decode → appsink, ALSA writer is external
+    #[cfg(target_os = "linux")]
     DirectAlsa {
         pipeline: gst::Pipeline,
         user_volume_el: Option<gst::Element>,
@@ -67,15 +68,17 @@ enum PlaybackBackend {
 impl PlaybackBackend {
     fn user_volume_el(&self) -> Option<&gst::Element> {
         match self {
-            PlaybackBackend::Normal { user_volume_el, .. }
-            | PlaybackBackend::DirectAlsa { user_volume_el, .. } => user_volume_el.as_ref(),
+            PlaybackBackend::Normal { user_volume_el, .. } => user_volume_el.as_ref(),
+            #[cfg(target_os = "linux")]
+            PlaybackBackend::DirectAlsa { user_volume_el, .. } => user_volume_el.as_ref(),
         }
     }
 
     fn norm_volume_el(&self) -> Option<&gst::Element> {
         match self {
-            PlaybackBackend::Normal { norm_volume_el, .. }
-            | PlaybackBackend::DirectAlsa { norm_volume_el, .. } => norm_volume_el.as_ref(),
+            PlaybackBackend::Normal { norm_volume_el, .. } => norm_volume_el.as_ref(),
+            #[cfg(target_os = "linux")]
+            PlaybackBackend::DirectAlsa { norm_volume_el, .. } => norm_volume_el.as_ref(),
         }
     }
 }
@@ -1197,9 +1200,20 @@ impl AudioPlayer {
                                     .property("volume", slider_to_amplitude(current_volume))
                                     .build()
                                     .map_err(|e| format!("Failed to create user volume: {e}"))?;
+                                #[cfg(target_os = "linux")]
                                 let sink = gst::ElementFactory::make("autoaudiosink")
                                     .build()
                                     .map_err(|e| format!("Failed to create autoaudiosink: {e}"))?;
+                                #[cfg(target_os = "windows")]
+                                let sink = {
+                                    let s = gst::ElementFactory::make("wasapisink")
+                                        .name("audio_sink")
+                                        .build()
+                                        .map_err(|e| format!("Failed to create wasapisink: {e}"))?;
+                                    s.set_property("exclusive", exclusive);
+                                    s.set_property("low-latency", true);
+                                    s
+                                };
 
                                 pipe.add_many([
                                     &uridecodebin,
@@ -1210,21 +1224,37 @@ impl AudioPlayer {
                                     &sink,
                                 ])
                                 .map_err(|e| format!("Failed to add elements: {e}"))?;
-                                gst::Element::link_many([
-                                    &audioconvert,
-                                    &audioresample,
-                                    &norm_vol,
-                                    &user_vol,
-                                    &sink,
-                                ])
-                                .map_err(|e| format!("Failed to link chain: {e}"))?;
 
-                                let convert_weak = audioconvert.downgrade();
+                                #[cfg(target_os = "windows")]
+                                let is_bp = bit_perfect;
+                                #[cfg(target_os = "linux")]
+                                let is_bp = false;
+
+                                if is_bp {
+                                    gst::Element::link_many([&norm_vol, &user_vol, &sink])
+                                        .map_err(|e| format!("Failed to link bit-perfect chain: {e}"))?;
+                                } else {
+                                    gst::Element::link_many([
+                                        &audioconvert,
+                                        &audioresample,
+                                        &norm_vol,
+                                        &user_vol,
+                                        &sink,
+                                    ])
+                                    .map_err(|e| format!("Failed to link normal chain: {e}"))?;
+                                }
+
+                                let target_weak = if is_bp {
+                                    norm_vol.downgrade()
+                                } else {
+                                    audioconvert.downgrade()
+                                };
+
                                 uridecodebin.connect_pad_added(move |_src, src_pad| {
-                                    let Some(convert) = convert_weak.upgrade() else {
+                                    let Some(target) = target_weak.upgrade() else {
                                         return;
                                     };
-                                    let Some(sink_pad) = convert.static_pad("sink") else {
+                                    let Some(sink_pad) = target.static_pad("sink") else {
                                         return;
                                     };
                                     if sink_pad.is_linked() {
@@ -1511,6 +1541,26 @@ impl AudioPlayer {
                         if !enabled {
                             bit_perfect = false;
                         }
+
+                        #[cfg(target_os = "windows")]
+                        if let Some(PlaybackBackend::Normal { pipeline, .. }) = backend.as_ref() {
+                            let mut position = gst::ClockTime::ZERO;
+                            if let Some(pos) = pipeline.query_position::<gst::ClockTime>() {
+                                position = pos;
+                            }
+                            let _ = pipeline.set_state(gst::State::Ready);
+                            if let Some(sink) = pipeline.by_name("audio_sink") {
+                                sink.set_property("exclusive", exclusive);
+                            }
+                            let _ = pipeline.set_state(gst::State::Playing);
+                            if position > gst::ClockTime::ZERO {
+                                let _ = pipeline.seek_simple(
+                                    gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                                    position,
+                                );
+                            }
+                        }
+
                         reply.send(Ok(())).ok();
                     }
 
