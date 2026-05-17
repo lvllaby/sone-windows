@@ -13,7 +13,7 @@ mod mpris;
 #[cfg(target_os = "windows")]
 mod media_controls;
 mod scrobble;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod tray;
 mod tidal_api;
 
@@ -586,8 +586,8 @@ pub fn run() {
                 let _ = window.show();
             }
 
-            // System tray icon (ksni — native D-Bus StatusNotifierItem)
-            #[cfg(target_os = "linux")]
+            // System tray icon
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             tray::setup(app);
 
             // Global media key shortcuts (non-fatal)

@@ -1,12 +1,19 @@
+#[cfg(target_os = "linux")]
 use ksni::menu::{MenuItem, StandardItem};
+#[cfg(target_os = "linux")]
 use ksni::TrayMethods;
 use tauri::{Emitter, Manager};
 
-/// Wrapper around ksni::Handle for tooltip updates.
+/// Wrapper around platform-specific tray handles for tooltip updates.
 /// Stored in Tauri managed state via `app.manage()`.
+#[cfg(target_os = "linux")]
 pub struct TrayHandle(ksni::Handle<SoneTray>);
 
+#[cfg(target_os = "windows")]
+pub struct TrayHandle(tauri::tray::TrayIcon);
+
 impl TrayHandle {
+    #[cfg(target_os = "linux")]
     pub async fn update_tooltip(&self, text: String) {
         self.0
             .update(move |tray| {
@@ -14,14 +21,21 @@ impl TrayHandle {
             })
             .await;
     }
+
+    #[cfg(target_os = "windows")]
+    pub async fn update_tooltip(&self, text: String) {
+        let _ = self.0.set_tooltip(Some(text));
+    }
 }
 
+#[cfg(target_os = "linux")]
 struct SoneTray {
     app_handle: tauri::AppHandle,
     tooltip: String,
     icon: ksni::Icon,
 }
 
+#[cfg(target_os = "linux")]
 impl std::fmt::Debug for SoneTray {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SoneTray")
@@ -32,6 +46,7 @@ impl std::fmt::Debug for SoneTray {
 
 /// Convert RGBA8 pixel data to ARGB32 in network byte order (big-endian),
 /// as required by the StatusNotifierItem D-Bus protocol.
+#[cfg(target_os = "linux")]
 fn rgba_to_argb(rgba: &[u8]) -> Vec<u8> {
     let mut argb = Vec::with_capacity(rgba.len());
     for pixel in rgba.chunks_exact(4) {
@@ -72,6 +87,7 @@ pub(crate) fn restore_window(app: &tauri::AppHandle) {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl ksni::Tray for SoneTray {
     fn id(&self) -> String {
         "sone".into()
@@ -149,6 +165,7 @@ impl ksni::Tray for SoneTray {
 /// Spawn the ksni tray on the tokio runtime. Non-blocking — registers the
 /// tray handle in Tauri state once the D-Bus connection is established.
 /// If it fails, logs a warning and disables minimize-to-tray.
+#[cfg(target_os = "linux")]
 pub fn setup(app: &tauri::App) {
     let icon_bytes = include_bytes!("../icons/icon.png");
     let icon = match image::load_from_memory(icon_bytes) {
@@ -194,4 +211,138 @@ pub fn setup(app: &tauri::App) {
             }
         }
     });
+}
+
+#[cfg(target_os = "windows")]
+pub fn setup(app: &tauri::App) {
+    use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
+    use tauri::tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState};
+
+    let app_handle = app.handle().clone();
+
+    // 1. Create Menu Items
+    let show_i = match MenuItemBuilder::with_id("show", "Show").build(app) {
+        Ok(item) => item,
+        Err(e) => {
+            log::error!("Failed to build tray show item: {e}");
+            return;
+        }
+    };
+    let play_i = match MenuItemBuilder::with_id("play", "Play / Pause").build(app) {
+        Ok(item) => item,
+        Err(e) => {
+            log::error!("Failed to build tray play item: {e}");
+            return;
+        }
+    };
+    let next_i = match MenuItemBuilder::with_id("next", "Next Track").build(app) {
+        Ok(item) => item,
+        Err(e) => {
+            log::error!("Failed to build tray next item: {e}");
+            return;
+        }
+    };
+    let prev_i = match MenuItemBuilder::with_id("prev", "Previous Track").build(app) {
+        Ok(item) => item,
+        Err(e) => {
+            log::error!("Failed to build tray prev item: {e}");
+            return;
+        }
+    };
+    let quit_i = match MenuItemBuilder::with_id("quit", "Quit").build(app) {
+        Ok(item) => item,
+        Err(e) => {
+            log::error!("Failed to build tray quit item: {e}");
+            return;
+        }
+    };
+
+    let sep1 = match PredefinedMenuItem::separator(app) {
+        Ok(sep) => sep,
+        Err(e) => {
+            log::error!("Failed to build tray separator: {e}");
+            return;
+        }
+    };
+    let sep2 = match PredefinedMenuItem::separator(app) {
+        Ok(sep) => sep,
+        Err(e) => {
+            log::error!("Failed to build tray separator: {e}");
+            return;
+        }
+    };
+
+    // 2. Build Context Menu
+    let menu = match MenuBuilder::new(app)
+        .item(&show_i)
+        .item(&sep1)
+        .item(&play_i)
+        .item(&next_i)
+        .item(&prev_i)
+        .item(&sep2)
+        .item(&quit_i)
+        .build()
+    {
+        Ok(m) => m,
+        Err(e) => {
+            log::error!("Failed to build tray menu: {e}");
+            return;
+        }
+    };
+
+    // 3. Load System Tray Icon
+    let icon_bytes = include_bytes!("../icons/icon.png");
+    let icon = match tauri::image::Image::from_bytes(icon_bytes) {
+        Ok(img) => img,
+        Err(e) => {
+            log::error!("Failed to decode tray icon: {e}");
+            return;
+        }
+    };
+
+    // 4. Build and configure the System Tray
+    let tray_builder = TrayIconBuilder::new()
+        .icon(icon)
+        .tooltip("Sone")
+        .menu(&menu)
+        .show_menu_on_left_click(false) // So we can restore the window on left-click, and show menu on right-click
+        .on_menu_event(move |app_handle, event| {
+            match event.id().0.as_str() {
+                "show" => {
+                    restore_window(app_handle);
+                }
+                "play" => {
+                    let _ = app_handle.emit("tray:toggle-play", ());
+                }
+                "next" => {
+                    let _ = app_handle.emit("tray:next-track", ());
+                }
+                "prev" => {
+                    let _ = app_handle.emit("tray:prev-track", ());
+                }
+                "quit" => {
+                    app_handle.exit(0);
+                }
+                _ => {}
+            }
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+                restore_window(tray.app_handle());
+            }
+        });
+
+    match tray_builder.build(app) {
+        Ok(tray_icon) => {
+            app_handle.manage(TrayHandle(tray_icon));
+            log::info!("Windows native tray icon registered");
+        }
+        Err(e) => {
+            log::warn!("Failed to create Windows native tray: {e}");
+            let state = app_handle.state::<crate::AppState>();
+            state
+                .minimize_to_tray
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }
