@@ -233,6 +233,7 @@ pub fn load_playback_queue(state: State<'_, AppState>) -> Result<Option<String>,
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct MprisMetadata {
     pub track_id: u64,
     pub title: String,

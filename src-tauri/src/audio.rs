@@ -1,9 +1,13 @@
 use gst::prelude::*;
 use gstreamer as gst;
+#[cfg(target_os = "linux")]
 use gstreamer_app as gst_app;
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicU32, AtomicU64};
 use std::sync::{mpsc, Arc};
+#[cfg(target_os = "linux")]
 use std::thread::JoinHandle;
 use tauri::Emitter;
 
@@ -18,12 +22,14 @@ pub struct AudioDevice {
 // ── PCM types ──────────────────────────────────────────────────────────
 
 /// Raw PCM chunk from GStreamer appsink
+#[cfg(target_os = "linux")]
 struct AudioChunk {
     data: Vec<u8>,
     format: PcmFormat,
     generation: u64,
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Clone, Debug, PartialEq)]
 struct PcmFormat {
     sample_rate: u32,
@@ -33,6 +39,7 @@ struct PcmFormat {
 }
 
 /// Commands to the ALSA writer thread
+#[cfg(target_os = "linux")]
 enum WriterCommand {
     Data(AudioChunk),
     EndOfTrack {
@@ -85,6 +92,7 @@ impl PlaybackBackend {
 
 // ── Helper functions ───────────────────────────────────────────────────
 
+#[cfg(target_os = "linux")]
 fn parse_pcm_format(caps: &gst::CapsRef) -> Option<PcmFormat> {
     let s = caps.structure(0)?;
     if !s.name().as_str().starts_with("audio/") {
@@ -923,16 +931,27 @@ impl AudioPlayer {
 
             let mut backend: Option<PlaybackBackend> = None;
             // ALSA writer state — lives outside PlaybackBackend so it persists across track changes
+            #[cfg(target_os = "linux")]
             let mut writer_tx: Option<crossbeam_channel::Sender<WriterCommand>> = None;
+            #[cfg(target_os = "linux")]
             let mut writer_thread: Option<JoinHandle<()>> = None;
+            #[cfg(target_os = "linux")]
             let mut writer_fmt: Option<PcmFormat> = None;
+            #[cfg(target_os = "linux")]
             let mut writer_supported_fmts: Option<Vec<&'static str>> = None;
+            #[cfg(target_os = "linux")]
             let mut writer_supported_rates: Option<Vec<u32>> = None;
+            #[cfg(target_os = "linux")]
             let mut writer_device: Option<String> = None;
+            #[cfg(target_os = "linux")]
             let frames_written = Arc::new(AtomicU64::new(0));
+            #[cfg(target_os = "linux")]
             let current_sample_rate = Arc::new(AtomicU32::new(48000));
+            #[cfg(target_os = "linux")]
             let writer_gen = Arc::new(AtomicU64::new(0));
+            #[cfg(target_os = "linux")]
             let paused = Arc::new(AtomicBool::new(false));
+            #[cfg(target_os = "linux")]
             let combined_vol = Arc::new(AtomicU32::new(1.0_f32.to_bits()));
 
             let eos = Arc::new(AtomicBool::new(false));
@@ -941,10 +960,12 @@ impl AudioPlayer {
 
             let mut exclusive = false;
             let mut bit_perfect = false;
+            #[cfg(target_os = "linux")]
             let mut device: Option<String> = None;
 
             let mut current_volume: f64 = 1.0;
             let mut current_norm_gain: f64 = 1.0;
+            #[cfg(target_os = "linux")]
             let mut track_generation: u64 = 0;
 
             for cmd in cmd_rx {
@@ -976,6 +997,7 @@ impl AudioPlayer {
                                             old_pipe.set_state(gst::State::Null).ok();
                                         });
                                     }
+                                    #[cfg(target_os = "linux")]
                                     PlaybackBackend::DirectAlsa { pipeline, .. } => {
                                         // Unblock writer if paused, then bump generation —
                                         // writer instantly discards stale Data, channel
@@ -1003,6 +1025,7 @@ impl AudioPlayer {
                             tearing_down.store(false, Ordering::SeqCst);
                             eos.store(false, Ordering::SeqCst);
                             has_uri.store(true, Ordering::SeqCst);
+                            #[cfg(target_os = "linux")]
                             frames_written.store(0, Ordering::Relaxed);
 
                             if exclusive || bit_perfect {
@@ -1163,11 +1186,14 @@ impl AudioPlayer {
                             } else {
                                 // ── Normal path (unchanged) ──
                                 // Shut down any lingering ALSA writer from a mode switch
-                                if let Some(tx) = writer_tx.take() {
-                                    tx.try_send(WriterCommand::Shutdown).ok();
-                                }
-                                if let Some(h) = writer_thread.take() {
-                                    h.join().ok();
+                                #[cfg(target_os = "linux")]
+                                {
+                                    if let Some(tx) = writer_tx.take() {
+                                        tx.try_send(WriterCommand::Shutdown).ok();
+                                    }
+                                    if let Some(h) = writer_thread.take() {
+                                        h.join().ok();
+                                    }
                                 }
 
                                 let pipe = gst::Pipeline::new();
@@ -1349,6 +1375,7 @@ impl AudioPlayer {
                                 .set_state(gst::State::Paused)
                                 .map(|_| ())
                                 .map_err(|e| format!("Failed to pause: {e}")),
+                            #[cfg(target_os = "linux")]
                             Some(PlaybackBackend::DirectAlsa { pipeline, .. }) => {
                                 paused.store(true, Ordering::Release);
                                 pipeline
@@ -1367,6 +1394,7 @@ impl AudioPlayer {
                                 .set_state(gst::State::Playing)
                                 .map(|_| ())
                                 .map_err(|e| format!("Failed to resume: {e}")),
+                            #[cfg(target_os = "linux")]
                             Some(PlaybackBackend::DirectAlsa { pipeline, .. }) => {
                                 paused.store(false, Ordering::Release);
                                 pipeline
@@ -1392,6 +1420,7 @@ impl AudioPlayer {
                                 });
                                 Ok(())
                             }
+                            #[cfg(target_os = "linux")]
                             Some(PlaybackBackend::DirectAlsa { pipeline, .. }) => {
                                 // Bump generation so writer discards stale data,
                                 // then unblock and shut down
@@ -1419,11 +1448,14 @@ impl AudioPlayer {
                             }
                             None => {
                                 // Clean up orphaned writer (e.g. pipeline build failed after spawn)
-                                if let Some(tx) = writer_tx.take() {
-                                    let _ = tx.send(WriterCommand::Shutdown);
-                                }
-                                if let Some(h) = writer_thread.take() {
-                                    h.join().ok();
+                                #[cfg(target_os = "linux")]
+                                {
+                                    if let Some(tx) = writer_tx.take() {
+                                        let _ = tx.send(WriterCommand::Shutdown);
+                                    }
+                                    if let Some(h) = writer_thread.take() {
+                                        h.join().ok();
+                                    }
                                 }
                                 Ok(())
                             }
@@ -1437,6 +1469,7 @@ impl AudioPlayer {
                         if let Some(vol) = backend.as_ref().and_then(|b| b.user_volume_el()) {
                             vol.set_property("volume", amplitude);
                         }
+                        #[cfg(target_os = "linux")]
                         combined_vol.store(
                             ((amplitude * current_norm_gain) as f32).to_bits(),
                             Ordering::Relaxed,
@@ -1449,6 +1482,7 @@ impl AudioPlayer {
                         if let Some(vol) = backend.as_ref().and_then(|b| b.norm_volume_el()) {
                             vol.set_property("volume", gain);
                         }
+                        #[cfg(target_os = "linux")]
                         combined_vol.store(
                             ((slider_to_amplitude(current_volume) * current_norm_gain) as f32).to_bits(),
                             Ordering::Relaxed,
@@ -1472,6 +1506,7 @@ impl AudioPlayer {
                                     )
                                     .map_err(|e| format!("Seek failed: {e}"))
                             }
+                            #[cfg(target_os = "linux")]
                             Some(PlaybackBackend::DirectAlsa { pipeline, .. }) => {
                                 let was_paused = paused.load(Ordering::Acquire);
                                 paused.store(false, Ordering::Release);
@@ -1509,6 +1544,7 @@ impl AudioPlayer {
                                 .query_position::<gst::ClockTime>()
                                 .map(|pos| pos.nseconds() as f32 / 1_000_000_000.0)
                                 .unwrap_or(0.0),
+                            #[cfg(target_os = "linux")]
                             Some(PlaybackBackend::DirectAlsa { .. }) => {
                                 let frames = frames_written.load(Ordering::Relaxed);
                                 let rate = current_sample_rate.load(Ordering::Relaxed);
@@ -1531,11 +1567,12 @@ impl AudioPlayer {
 
                     AudioCommand::SetExclusiveMode {
                         enabled,
-                        device: dev,
+                        device: _dev,
                         reply,
                     } => {
                         exclusive = enabled;
-                        if let Some(d) = dev {
+                        #[cfg(target_os = "linux")]
+                        if let Some(d) = _dev {
                             device = Some(d);
                         }
                         if !enabled {

@@ -1,5 +1,5 @@
 use std::sync::atomic::Ordering;
-use tauri::{Manager, State};
+use tauri::State;
 
 use super::playback::compute_norm_gain;
 use crate::audio::AudioDevice;
@@ -8,6 +8,7 @@ use crate::AppState;
 use crate::SoneError;
 
 #[tauri::command]
+#[allow(unused_variables)]
 pub async fn update_tray_tooltip(app: tauri::AppHandle, text: String) -> Result<String, SoneError> {
     #[cfg(target_os = "linux")]
     if let Some(tray_handle) = app.try_state::<crate::tray::TrayHandle>() {

@@ -1,6 +1,6 @@
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, PlatformConfig, MediaPlayback};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, Manager, Window};
+use tauri::{AppHandle, Emitter, Manager};
 
 pub struct WindowsMediaHandle {
     controls: Arc<Mutex<Option<MediaControls>>>,
@@ -37,7 +37,7 @@ impl WindowsMediaHandle {
                         m.attach(move |event| match event {
                             MediaControlEvent::Play => { app.emit("tray:toggle-play", ()).ok(); },
                             MediaControlEvent::Pause => { app.emit("tray:toggle-play", ()).ok(); },
-                            MediaControlEvent::TogglePlayPause => { app.emit("tray:toggle-play", ()).ok(); },
+                            MediaControlEvent::Toggle => { app.emit("tray:toggle-play", ()).ok(); },
                             MediaControlEvent::Next => { app.emit("tray:next-track", ()).ok(); },
                             MediaControlEvent::Previous => { app.emit("tray:prev-track", ()).ok(); },
                             MediaControlEvent::Stop => { app.emit("mpris:stop", ()).ok(); },
