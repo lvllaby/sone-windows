@@ -1,0 +1,162 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="INSTALLDIR">
+      <!-- Core bin DLLs -->
+      <Component Id="comp_bin_ffi_7.dll" Guid="*">
+        <File Id="file_bin_ffi_7.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\ffi-7.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_FLAC_8.dll" Guid="*">
+        <File Id="file_bin_FLAC_8.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\FLAC-8.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_gio_2.0_0.dll" Guid="*">
+        <File Id="file_bin_gio_2.0_0.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\gio-2.0-0.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_glib_2.0_0.dll" Guid="*">
+        <File Id="file_bin_glib_2.0_0.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\glib-2.0-0.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_gmodule_2.0_0.dll" Guid="*">
+        <File Id="file_bin_gmodule_2.0_0.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\gmodule-2.0-0.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_gobject_2.0_0.dll" Guid="*">
+        <File Id="file_bin_gobject_2.0_0.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\gobject-2.0-0.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_gstadaptivedemux_1.0_0.dll" Guid="*">
+        <File Id="file_bin_gstadaptivedemux_1.0_0.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\gstadaptivedemux-1.0-0.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_gstaudio_1.0_0.dll" Guid="*">
+        <File Id="file_bin_gstaudio_1.0_0.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\gstaudio-1.0-0.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_gstbase_1.0_0.dll" Guid="*">
+        <File Id="file_bin_gstbase_1.0_0.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\gstbase-1.0-0.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_gstisoff_1.0_0.dll" Guid="*">
+        <File Id="file_bin_gstisoff_1.0_0.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\gstisoff-1.0-0.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_gstnet_1.0_0.dll" Guid="*">
+        <File Id="file_bin_gstnet_1.0_0.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\gstnet-1.0-0.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_gstpbutils_1.0_0.dll" Guid="*">
+        <File Id="file_bin_gstpbutils_1.0_0.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\gstpbutils-1.0-0.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_gstreamer_1.0_0.dll" Guid="*">
+        <File Id="file_bin_gstreamer_1.0_0.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\gstreamer-1.0-0.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_gstriff_1.0_0.dll" Guid="*">
+        <File Id="file_bin_gstriff_1.0_0.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\gstriff-1.0-0.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_gstrtp_1.0_0.dll" Guid="*">
+        <File Id="file_bin_gstrtp_1.0_0.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\gstrtp-1.0-0.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_gsttag_1.0_0.dll" Guid="*">
+        <File Id="file_bin_gsttag_1.0_0.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\gsttag-1.0-0.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_gsturidownloader_1.0_0.dll" Guid="*">
+        <File Id="file_bin_gsturidownloader_1.0_0.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\gsturidownloader-1.0-0.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_gstvideo_1.0_0.dll" Guid="*">
+        <File Id="file_bin_gstvideo_1.0_0.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\gstvideo-1.0-0.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_intl_8.dll" Guid="*">
+        <File Id="file_bin_intl_8.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\intl-8.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_libcrypto_3_x64.dll" Guid="*">
+        <File Id="file_bin_libcrypto_3_x64.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\libcrypto-3-x64.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_libssl_3_x64.dll" Guid="*">
+        <File Id="file_bin_libssl_3_x64.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\libssl-3-x64.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_nghttp2.dll" Guid="*">
+        <File Id="file_bin_nghttp2.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\nghttp2.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_ogg_0.dll" Guid="*">
+        <File Id="file_bin_ogg_0.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\ogg-0.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_orc_0.4_0.dll" Guid="*">
+        <File Id="file_bin_orc_0.4_0.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\orc-0.4-0.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_pcre2_8_0.dll" Guid="*">
+        <File Id="file_bin_pcre2_8_0.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\pcre2-8-0.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_psl_5.dll" Guid="*">
+        <File Id="file_bin_psl_5.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\psl-5.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_soup_3.0_0.dll" Guid="*">
+        <File Id="file_bin_soup_3.0_0.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\soup-3.0-0.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_sqlite3_0.dll" Guid="*">
+        <File Id="file_bin_sqlite3_0.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\sqlite3-0.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_xml2_16.dll" Guid="*">
+        <File Id="file_bin_xml2_16.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\xml2-16.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="comp_bin_z_1.dll" Guid="*">
+        <File Id="file_bin_z_1.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\z-1.dll" KeyPath="yes" />
+      </Component>
+
+      <!-- Library subdirectories -->
+      <Directory Id="dir_lib" Name="lib">
+        <!-- GStreamer 1.0 Plugins -->
+        <Directory Id="dir_gstreamer_1_0" Name="gstreamer-1.0">
+            <Component Id="comp_lib_gst_gstadaptivedemux2.dll" Guid="*">
+              <File Id="file_lib_gst_gstadaptivedemux2.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\lib\gstreamer-1.0\gstadaptivedemux2.dll" KeyPath="yes" />
+            </Component>
+            <Component Id="comp_lib_gst_gstasio.dll" Guid="*">
+              <File Id="file_lib_gst_gstasio.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\lib\gstreamer-1.0\gstasio.dll" KeyPath="yes" />
+            </Component>
+            <Component Id="comp_lib_gst_gstaudioconvert.dll" Guid="*">
+              <File Id="file_lib_gst_gstaudioconvert.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\lib\gstreamer-1.0\gstaudioconvert.dll" KeyPath="yes" />
+            </Component>
+            <Component Id="comp_lib_gst_gstaudioparsers.dll" Guid="*">
+              <File Id="file_lib_gst_gstaudioparsers.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\lib\gstreamer-1.0\gstaudioparsers.dll" KeyPath="yes" />
+            </Component>
+            <Component Id="comp_lib_gst_gstaudioresample.dll" Guid="*">
+              <File Id="file_lib_gst_gstaudioresample.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\lib\gstreamer-1.0\gstaudioresample.dll" KeyPath="yes" />
+            </Component>
+            <Component Id="comp_lib_gst_gstcoreelements.dll" Guid="*">
+              <File Id="file_lib_gst_gstcoreelements.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\lib\gstreamer-1.0\gstcoreelements.dll" KeyPath="yes" />
+            </Component>
+            <Component Id="comp_lib_gst_gstdash.dll" Guid="*">
+              <File Id="file_lib_gst_gstdash.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\lib\gstreamer-1.0\gstdash.dll" KeyPath="yes" />
+            </Component>
+            <Component Id="comp_lib_gst_gstdecklink.dll" Guid="*">
+              <File Id="file_lib_gst_gstdecklink.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\lib\gstreamer-1.0\gstdecklink.dll" KeyPath="yes" />
+            </Component>
+            <Component Id="comp_lib_gst_gstflac.dll" Guid="*">
+              <File Id="file_lib_gst_gstflac.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\lib\gstreamer-1.0\gstflac.dll" KeyPath="yes" />
+            </Component>
+            <Component Id="comp_lib_gst_gstisomp4.dll" Guid="*">
+              <File Id="file_lib_gst_gstisomp4.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\lib\gstreamer-1.0\gstisomp4.dll" KeyPath="yes" />
+            </Component>
+            <Component Id="comp_lib_gst_gstplayback.dll" Guid="*">
+              <File Id="file_lib_gst_gstplayback.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\lib\gstreamer-1.0\gstplayback.dll" KeyPath="yes" />
+            </Component>
+            <Component Id="comp_lib_gst_gstsoup.dll" Guid="*">
+              <File Id="file_lib_gst_gstsoup.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\lib\gstreamer-1.0\gstsoup.dll" KeyPath="yes" />
+            </Component>
+            <Component Id="comp_lib_gst_gsttypefindfunctions.dll" Guid="*">
+              <File Id="file_lib_gst_gsttypefindfunctions.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\lib\gstreamer-1.0\gsttypefindfunctions.dll" KeyPath="yes" />
+            </Component>
+            <Component Id="comp_lib_gst_gstvolume.dll" Guid="*">
+              <File Id="file_lib_gst_gstvolume.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\lib\gstreamer-1.0\gstvolume.dll" KeyPath="yes" />
+            </Component>
+            <Component Id="comp_lib_gst_gstwasapi2.dll" Guid="*">
+              <File Id="file_lib_gst_gstwasapi2.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\lib\gstreamer-1.0\gstwasapi2.dll" KeyPath="yes" />
+            </Component>
+            <Component Id="comp_lib_gst_gstwinks.dll" Guid="*">
+              <File Id="file_lib_gst_gstwinks.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\lib\gstreamer-1.0\gstwinks.dll" KeyPath="yes" />
+            </Component>
+        </Directory>
+        
+        <!-- GIO modules -->
+        <Directory Id="dir_gio" Name="gio">
+          <Directory Id="dir_modules" Name="modules">
+                <Component Id="comp_lib_gio_gioopenssl.dll" Guid="*">
+                  <File Id="file_lib_gio_gioopenssl.dll" Source="C:\Users\lvllaby\Documents\sone\src-tauri\gstreamer-runtime\lib\gio\modules\gioopenssl.dll" KeyPath="yes" />
+                </Component>
+          </Directory>
+        </Directory>
+      </Directory>
+    </DirectoryRef>
+  </Fragment>
+</Wix>

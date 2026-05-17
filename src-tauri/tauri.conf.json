@@ -73,12 +73,73 @@
       "appimage": {
         "bundleMediaFramework": true
       }
+    },
+    "windows": {
+      "nsis": {
+        "installerHooks": "gstreamer-hooks.nsi"
+      },
+      "wix": {
+        "fragmentPaths": [
+          "gstreamer-fragment.wxs"
+        ],
+        "componentRefs": [
+          "comp_bin_ffi_7.dll",
+          "comp_bin_FLAC_8.dll",
+          "comp_bin_gio_2.0_0.dll",
+          "comp_bin_glib_2.0_0.dll",
+          "comp_bin_gmodule_2.0_0.dll",
+          "comp_bin_gobject_2.0_0.dll",
+          "comp_bin_gstadaptivedemux_1.0_0.dll",
+          "comp_bin_gstaudio_1.0_0.dll",
+          "comp_bin_gstbase_1.0_0.dll",
+          "comp_bin_gstisoff_1.0_0.dll",
+          "comp_bin_gstnet_1.0_0.dll",
+          "comp_bin_gstpbutils_1.0_0.dll",
+          "comp_bin_gstreamer_1.0_0.dll",
+          "comp_bin_gstriff_1.0_0.dll",
+          "comp_bin_gstrtp_1.0_0.dll",
+          "comp_bin_gsttag_1.0_0.dll",
+          "comp_bin_gsturidownloader_1.0_0.dll",
+          "comp_bin_gstvideo_1.0_0.dll",
+          "comp_bin_intl_8.dll",
+          "comp_bin_libcrypto_3_x64.dll",
+          "comp_bin_libssl_3_x64.dll",
+          "comp_bin_nghttp2.dll",
+          "comp_bin_ogg_0.dll",
+          "comp_bin_orc_0.4_0.dll",
+          "comp_bin_pcre2_8_0.dll",
+          "comp_bin_psl_5.dll",
+          "comp_bin_soup_3.0_0.dll",
+          "comp_bin_sqlite3_0.dll",
+          "comp_bin_xml2_16.dll",
+          "comp_bin_z_1.dll",
+          "comp_lib_gst_gstadaptivedemux2.dll",
+          "comp_lib_gst_gstasio.dll",
+          "comp_lib_gst_gstaudioconvert.dll",
+          "comp_lib_gst_gstaudioparsers.dll",
+          "comp_lib_gst_gstaudioresample.dll",
+          "comp_lib_gst_gstcoreelements.dll",
+          "comp_lib_gst_gstdash.dll",
+          "comp_lib_gst_gstdecklink.dll",
+          "comp_lib_gst_gstflac.dll",
+          "comp_lib_gst_gstisomp4.dll",
+          "comp_lib_gst_gstplayback.dll",
+          "comp_lib_gst_gstsoup.dll",
+          "comp_lib_gst_gsttypefindfunctions.dll",
+          "comp_lib_gst_gstvolume.dll",
+          "comp_lib_gst_gstwasapi2.dll",
+          "comp_lib_gst_gstwinks.dll",
+          "comp_lib_gio_gioopenssl.dll"
+        ]
+      }
     }
   },
   "plugins": {
     "deep-link": {
       "desktop": {
-        "schemes": ["tidal"]
+        "schemes": [
+          "tidal"
+        ]
       }
     }
   }
