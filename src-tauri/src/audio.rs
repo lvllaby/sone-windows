@@ -960,7 +960,6 @@ impl AudioPlayer {
 
             let mut exclusive = false;
             let mut bit_perfect = false;
-            #[cfg(target_os = "linux")]
             let mut device: Option<String> = None;
 
             let mut current_volume: f64 = 1.0;
@@ -1028,11 +1027,13 @@ impl AudioPlayer {
                             #[cfg(target_os = "linux")]
                             frames_written.store(0, Ordering::Relaxed);
 
-                            if exclusive || bit_perfect {
-                                // ── DirectAlsa path ──
-                                #[cfg(not(target_os = "linux"))]
-                                return Err("Exclusive/bit-perfect mode requires Linux".into());
+                            #[cfg(target_os = "linux")]
+                            let use_direct_alsa = exclusive || bit_perfect;
+                            #[cfg(not(target_os = "linux"))]
+                            let use_direct_alsa = false;
 
+                            if use_direct_alsa {
+                                // ── DirectAlsa path ──
                                 #[cfg(target_os = "linux")]
                                 {
                                     let dev = device.as_deref().ok_or_else(|| {
@@ -1232,12 +1233,15 @@ impl AudioPlayer {
                                     .map_err(|e| format!("Failed to create autoaudiosink: {e}"))?;
                                 #[cfg(target_os = "windows")]
                                 let sink = {
-                                    let s = gst::ElementFactory::make("wasapisink")
+                                    let s = gst::ElementFactory::make("wasapi2sink")
                                         .name("audio_sink")
                                         .build()
-                                        .map_err(|e| format!("Failed to create wasapisink: {e}"))?;
+                                        .map_err(|e| format!("Failed to create wasapi2sink: {e}"))?;
                                     s.set_property("exclusive", exclusive);
                                     s.set_property("low-latency", true);
+                                    if let Some(ref d) = device {
+                                        s.set_property("device", d);
+                                    }
                                     s
                                 };
 
@@ -1257,7 +1261,7 @@ impl AudioPlayer {
                                 let is_bp = false;
 
                                 if is_bp {
-                                    gst::Element::link_many([&norm_vol, &user_vol, &sink])
+                                    gst::Element::link_many([&audioconvert, &norm_vol, &user_vol, &sink])
                                         .map_err(|e| format!("Failed to link bit-perfect chain: {e}"))?;
                                 } else {
                                     gst::Element::link_many([
@@ -1270,11 +1274,7 @@ impl AudioPlayer {
                                     .map_err(|e| format!("Failed to link normal chain: {e}"))?;
                                 }
 
-                                let target_weak = if is_bp {
-                                    norm_vol.downgrade()
-                                } else {
-                                    audioconvert.downgrade()
-                                };
+                                let target_weak = audioconvert.downgrade();
 
                                 uridecodebin.connect_pad_added(move |_src, src_pad| {
                                     let Some(target) = target_weak.upgrade() else {
@@ -1571,7 +1571,6 @@ impl AudioPlayer {
                         reply,
                     } => {
                         exclusive = enabled;
-                        #[cfg(target_os = "linux")]
                         if let Some(d) = _dev {
                             device = Some(d);
                         }
@@ -1588,6 +1587,9 @@ impl AudioPlayer {
                             let _ = pipeline.set_state(gst::State::Ready);
                             if let Some(sink) = pipeline.by_name("audio_sink") {
                                 sink.set_property("exclusive", exclusive);
+                                if let Some(ref d) = device {
+                                    sink.set_property("device", d);
+                                }
                             }
                             let _ = pipeline.set_state(gst::State::Playing);
                             if position > gst::ClockTime::ZERO {
@@ -2021,20 +2023,39 @@ fn list_alsa_devices_inner() -> Result<Vec<AudioDevice>, String> {
         };
 
         let api = props.get::<String>("device.api").unwrap_or_default();
-        if api != "alsa" {
-            continue;
+
+        #[cfg(target_os = "linux")]
+        {
+            if api != "alsa" {
+                continue;
+            }
+
+            let path = props.get::<String>("api.alsa.path").ok().or_else(|| {
+                let card = props.get::<String>("alsa.card").ok()?;
+                let dev_num = props.get::<String>("alsa.device").ok()?;
+                Some(format!("hw:{card},{dev_num}"))
+            });
+
+            if let Some(path) = path {
+                let name = dev.display_name().to_string();
+                log::debug!("[list_alsa_devices] found: '{}' -> {}", name, path);
+                result.push(AudioDevice { id: path, name });
+            }
         }
 
-        let path = props.get::<String>("api.alsa.path").ok().or_else(|| {
-            let card = props.get::<String>("alsa.card").ok()?;
-            let dev_num = props.get::<String>("alsa.device").ok()?;
-            Some(format!("hw:{card},{dev_num}"))
-        });
+        #[cfg(target_os = "windows")]
+        {
+            if api != "wasapi2" && api != "wasapi" {
+                continue;
+            }
 
-        if let Some(path) = path {
-            let name = dev.display_name().to_string();
-            log::debug!("[list_alsa_devices] found: '{}' -> {}", name, path);
-            result.push(AudioDevice { id: path, name });
+            let path = props.get::<String>("device.id").ok();
+
+            if let Some(path) = path {
+                let name = dev.display_name().to_string();
+                log::debug!("[list_alsa_devices] found: '{}' -> {}", name, path);
+                result.push(AudioDevice { id: path, name });
+            }
         }
     }
 
