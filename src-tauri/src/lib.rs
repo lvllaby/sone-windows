@@ -13,6 +13,8 @@ mod mpris;
 #[cfg(target_os = "windows")]
 mod media_controls;
 mod scrobble;
+#[allow(dead_code)]
+mod sonos;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod tray;
 mod tidal_api;
