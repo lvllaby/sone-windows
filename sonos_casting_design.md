@@ -210,3 +210,25 @@ Manual checklist on the user's speakers:
 5. UI: button, picker, indicator and the Settings row.
 6. Handoff and reconnect.
 7. Error-handling polish and the manual checklist.
+
+## 10. Probe findings (2026-10-21, firmware 94.1-76070)
+
+Run against the user's system: "Sonos PC" (Beam, ZPS14) and "Sonos Music" (two One SL, ZPS22).
+
+- **Discovery:** SSDP `ZonePlayer:1` answered from all 3 devices via the Ethernet adapter. The machine also has a VPN adapter (100.64/10 range), which confirms the need for per-interface sends.
+- **Topology:**
+  - The two One SLs are a **stereo pair**: one zone "Sonos Music", `ChannelMapSet` set, one member `Invisible="1"`. The pair gets a single volume and no per-speaker sliders.
+  - The invisible member can come **first** in the XML, so the parser must order by `Coordinator`, not by document order.
+  - A non-coordinator member's transport reports `x-rincon:<coordinator>`.
+- **TIDAL constants:**
+  - `TIDAL_SID = 174`, `TIDAL_TRACK_FLAGS = 24616`, `TIDAL_TRACK_EXT = "flac"`.
+  - URI: `x-sonos-http:track%2f<id>.flac?sid=174&flags=24616&sn=<sn>`.
+  - `sn` is discovered at runtime from `Q:0` items. The user's TIDAL link had no favourites, and `R:0/0` was empty, so `Q:0` is the source that actually yielded it.
+- **Playback:**
+  - A track enqueued by URI with **empty metadata** plays (`PLAYING`, position advancing), and `Seek REL_TIME` works within it.
+  - Firmware 94.1 **drops client-supplied DIDL metadata** for these items, whether sent with `AddURIToQueue` or `AddMultipleURIsToQueue`, with or without `desc`/item-id prefix. Queue entries come back with `upnp:class` `object.item`, no `dc:title`, and no `res@duration`.
+  - SONE resolves titles and durations from TIDAL by track id, so this only affects how other Sonos controllers display SONE-cast tracks.
+  - `build_track_didl` still sends a minimal DIDL (`TIDAL_ITEM_ID_PREFIX = "10032020"`, class `object.item.audioItem.musicTrack`, `TIDAL_DESC_TOKEN = "SA_RINCON44551_X_#Svc44551-0-Token"`). It's harmless, and useful if firmware honours it.
+- **TV input:** the Beam's TV input reports `TrackURI` `x-sonos-htastream:<RINCON>:spdif`, with `TrackDuration`/`RelTime`/`TrackMetaData` `NOT_IMPLEMENTED`.
+- **UPnP fault:** a `Seek` with a bad unit returns HTTP 500, `errorCode` 710.
+- **Fixtures:** `src-tauri/src/sonos/fixtures/` (sanitized: IPs → 192.0.2.x, RINCON ids → `RINCON_000000000001..3 01400`, `sn` → 3, the Beam room renamed `Kök & Bad` to exercise escaping).
