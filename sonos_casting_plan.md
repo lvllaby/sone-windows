@@ -24,7 +24,7 @@
 - `AddMultipleURIsToQueue` in batches of **16**. Sonos queue cap **1000** items. History sent ≤ **50**. Fast start: current track + the next **15**.
 - Reachability: **3** consecutive failed polls → Reconnecting; **30 s** unreachable → fall back to This computer **without starting local playback**, keeping `sonos_last_coordinator`.
 - Volume requests are throttled to one per **100 ms**, with the final value always sent.
-- Sonos `SHUFFLE*` play modes are never set by SONE. `notify_track_started` is never called while casting.
+- Sonos `SHUFFLE*` play modes are never set by SONE. While casting, scrobbling is driven only by `useSonosSync` (Task 8) from mirrored state, never by `playTrack` (spec §4, superseded note: SONE scrobbles casts).
 - UI copy, verbatim: tooltip `Sonos speakers`; picker header `Play on`; row `This computer`; `Playing on <group>`; `Reconnecting to <group>…`; `Couldn't reach <group>`; `Track unavailable on Sonos — skipping`; `Play any TIDAL track once from the Sonos app, then retry`; `Applies to This computer only`; Settings `N speakers found` / `None found`, button `Rescan`; non-TIDAL TV item title `TV`.
 - Group display name: the coordinator's room name, or member room names joined with ` + ` (coordinator first) when a group has more than one visible member.
 - Every new Tauri command is registered in `generate_handler!` in `src-tauri/src/lib.rs`. Commands use `#[tauri::command(rename_all = "camelCase")]`, and payload structs use `#[serde(rename_all = "camelCase")]`.
@@ -431,6 +431,10 @@ Guards in `usePlaybackActions`, all checking `store.get(playbackTargetAtom).type
 - **Top-up:** when `trackIndex >= items.length - 2`, if there's stashed overflow, `appendEnd(next ≤ 200)`; else if `autoplayAtom` is set, append recommendations using the existing autoplay fetch from the local path.
 - **Unavailable track:** `sonos-playback-error` → `next()` + toast `Track unavailable on Sonos — skipping`, counted against `MAX_CONSECUTIVE_PLAY_FAILS` through `consecutiveFailCountAtom`. Export that constant from `usePlaybackActions.ts` (or wherever it is defined) to share it.
 - **Non-TIDAL content:** when the current item's kind isn't `tidal`, `insertNext`, `insertAfterPending`, `replaceUpcoming` and autoplay are skipped.
+- **Scrobbling casts:**
+  - When the pair (Sonos `trackIndex`, current TIDAL track id) changes, so that a repeat of the same track at a new index counts as a new play, call `notify_track_started` with the same payload shape `playTrack` builds locally, with `chosenByUser: false`. Placeholder (non-TIDAL) tracks are never sent.
+  - On `transportState` `playing` → `paused`, call `notify_track_paused`; on `paused` → `playing`, call `notify_track_resumed`. `sonosActions.seek` calls `notify_track_seeked`.
+  - Nothing is sent while `sonosHandoffAtom` is set, so the handoff itself doesn't count as a play.
 
 - [ ] **Step 1:** Implement `sonosActions.ts` and the guards.
 - [ ] **Step 2:** Run `npm run build && npm run lint && npm run knip`. Expected: clean.
@@ -440,7 +444,7 @@ Guards in `usePlaybackActions`, all checking `store.get(playbackTargetAtom).type
   - "Play next" and "Add to queue" order, plus remove and drag-reorder in the queue drawer.
   - Shuffle on/off and repeat 0/1/2 (the Sonos app shows the mode).
   - Media keys and tray.
-  - Last.fm shows no new scrobble from SONE.
+  - A cast track played past the scrobble threshold appears once on Last.fm, and the next cast track shows as "now playing".
 - [ ] **Step 4: Commit:** `feat(sonos): route playback actions to Sonos while casting`
 
 ---
@@ -458,7 +462,7 @@ Guards in `usePlaybackActions`, all checking `store.get(playbackTargetAtom).type
     - On error, restore the local target, call `sonosSelectGroup(null, false)` and resume local if it was playing.
     - Toast `Play any TIDAL track once from the Sonos app, then retry` when the error message equals `SONOS_SN_UNKNOWN`; otherwise `Couldn't reach <group>`.
     - Nothing loaded locally → select + set target only (mirror).
-  - **G → local:** `sonosPause()`, `sonosSelectGroup(null, true)`, set the target to local, keep the mirrored atoms.
+  - **G → local:** `notify_track_stopped`, `sonosPause()`, `sonosSelectGroup(null, true)`, set the target to local, keep the mirrored atoms. The fallback below also calls `notify_track_stopped`.
     - If G was playing: `playTrack(current, { skipHistoryPush: true })` then `seekTo(pos)`.
     - Otherwise set `pendingResumePositionAtom = pos` and leave the track paused.
   - **G → H:** pause G, then the local → H path without local play/pause.

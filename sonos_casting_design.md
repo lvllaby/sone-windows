@@ -104,6 +104,7 @@ Existing `get_playback_position` returns the last polled Sonos position while a 
 - `VolumeSlider` shows `sonosGroupVolumeAtom` (0–100 mapped to 0–1) while casting. The stored local `volumeAtom` is never overwritten. Mute uses `sonos_set_mute`.
 - **Position:** the backend serves the polled value through `get_playback_position`, as described in section 3.
 - **OS integration:** on track change, SONE calls a new command, `notify_track_started_remote`. It updates SMTC and Discord metadata and status but **skips scrobbling**, because Sonos can scrobble to Last.fm itself and doing both would double-count. The GStreamer `track-finished` listener never fires while casting.
+  - **Superseded (2026-10-22, user decision after the probe):** firmware 94.1 drops SONE's track metadata (§10), so Sonos can't scrobble SONE-cast tracks. **SONE scrobbles casts itself.** While attached to a group and running, each mirrored change to a new TIDAL current track calls the existing `notify_track_started` (`chosenByUser: false`). Transport changes call `notify_track_paused`/`notify_track_resumed`, SONE seeks call `notify_track_seeked`, and leaving the group calls `notify_track_stopped`. Wall-clock thresholds stay in `ScrobbleManager` as for local playback. Known limitations: nothing is scrobbled while SONE is closed. If Sonos's own Last.fm link is also on, tracks queued by other apps *with* metadata may be scrobbled twice.
 
 ## 5. UI
 
