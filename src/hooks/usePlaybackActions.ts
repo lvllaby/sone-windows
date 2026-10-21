@@ -8,7 +8,7 @@
  * (play, pause, queue, etc.) but don't need to read playback state.
  */
 
-import { useCallback, useRef } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import { useStore } from "jotai";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -39,12 +39,30 @@ import type { Track, StreamInfo, ManualTrackSource, QueuedTrack } from "../types
 import { getTidalImageUrl } from "../types";
 import { preloadImage } from "../components/TidalImage";
 import { getTrackArtistDisplay } from "../utils/itemHelpers";
+import { createSonosActions } from "./sonosActions";
 
 type PlayResult =
   | { ok: true }
   | { ok: false; reason: "network" | "unplayable" | "transient" };
 
-const MAX_CONSECUTIVE_PLAY_FAILS = 3;
+export const MAX_CONSECUTIVE_PLAY_FAILS = 3;
+
+/** Tells the scrobbler a track started playing (local playback and Sonos casts). */
+export function notifyTrackStarted(track: Track, chosenByUser: boolean) {
+  invoke("notify_track_started", {
+    payload: {
+      artist: getTrackArtistDisplay(track),
+      title: track.title,
+      album: track.album?.title || null,
+      albumArtist: null,
+      durationSecs: track.duration || 0,
+      trackNumber: track.trackNumber || null,
+      chosenByUser,
+      isrc: track.isrc || null,
+      trackId: track.id || null,
+    },
+  }).catch(() => {});
+}
 
 /** Normalize a raw track-like object into a proper Track.
  *  Handles the artist/artists mismatch from different API endpoints. */
@@ -129,6 +147,10 @@ async function invokePlayWithRetry(
 export function usePlaybackActions() {
   const store = useStore();
   const { showToast } = useToast();
+  const sonos = useMemo(
+    () => createSonosActions(store, showToast),
+    [store, showToast],
+  );
 
   const playGenerationRef = useRef(0);
   const autoplayIdsRef = useRef(new Set<number>());
@@ -177,6 +199,11 @@ export function usePlaybackActions() {
       (stamped as any)._playingFrom = store.get(playbackSourceAtom);
       (stamped as any)._contextFrom = store.get(contextSourceAtom);
       store.set(currentTrackAtom, stamped);
+      // Casting: Sonos plays it; useSonosSync scrobbles from the mirrored state
+      if (sonos.isCasting()) {
+        await sonos.loadFromAtoms(true);
+        return { ok: true };
+      }
 
       try {
         const info = await invokePlayWithRetry(
@@ -196,19 +223,7 @@ export function usePlaybackActions() {
         store.set(consecutiveFailCountAtom, 0);
 
         // Notify backend for scrobbling
-        invoke("notify_track_started", {
-          payload: {
-            artist: getTrackArtistDisplay(stamped),
-            title: stamped.title,
-            album: stamped.album?.title || null,
-            albumArtist: null,
-            durationSecs: stamped.duration || 0,
-            trackNumber: stamped.trackNumber || null,
-            chosenByUser: opts?.chosenByUser ?? true,
-            isrc: stamped.isrc || null,
-            trackId: stamped.id || null,
-          },
-        }).catch(() => {});
+        notifyTrackStarted(stamped, opts?.chosenByUser ?? true);
         return { ok: true };
       } catch (error: any) {
         if (generation !== playGenerationRef.current) {
@@ -237,19 +252,21 @@ export function usePlaybackActions() {
         return { ok: false, reason: "transient" };
       }
     },
-    [store, showToast],
+    [store, showToast, sonos],
   );
 
   const pauseTrack = useCallback(async () => {
+    if (sonos.isCasting()) return sonos.pause();
     try {
       await invoke("pause_track");
       store.set(isPlayingAtom, false);
     } catch (error) {
       console.error("Failed to pause track:", error);
     }
-  }, [store]);
+  }, [store, sonos]);
 
   const resumeTrack = useCallback(async () => {
+    if (sonos.isCasting()) return sonos.resume();
     try {
       const track = store.get(currentTrackAtom);
       if (!track) return;
@@ -299,10 +316,11 @@ export function usePlaybackActions() {
         );
       }
     }
-  }, [store, showToast]);
+  }, [store, showToast, sonos]);
 
   const setVolume = useCallback(
     async (level: number) => {
+      if (sonos.isCasting()) return sonos.setVolume(level);
       if (store.get(bitPerfectAtom)) return;
       store.set(volumeAtom, level);
       try {
@@ -311,26 +329,31 @@ export function usePlaybackActions() {
         console.error("Failed to set volume:", error);
       }
     },
-    [store],
+    [store, sonos],
   );
 
   const seekTo = useCallback(async (positionSecs: number) => {
+    if (sonos.isCasting()) return sonos.seek(positionSecs);
     try {
       await invoke("seek_track", { positionSecs });
       notifySeek(positionSecs);
     } catch (error) {
       console.error("Failed to seek:", error);
     }
-  }, []);
+  }, [sonos]);
 
   const addToQueue = useCallback(
     (track: Track, source?: ManualTrackSource) => {
       if (!store.get(allowExplicitAtom) && track.explicit) return;
       const stamped = stampQid(normalizeTrack(track));
       if (source) (stamped as QueuedTrack)._source = source;
+      if (sonos.isCasting()) {
+        void sonos.insertAfterPending([stamped]);
+        return;
+      }
       store.set(manualQueueAtom, [...store.get(manualQueueAtom), stamped]);
     },
-    [store],
+    [store, sonos],
   );
 
   const playNextInQueue = useCallback(
@@ -338,9 +361,13 @@ export function usePlaybackActions() {
       if (!store.get(allowExplicitAtom) && track.explicit) return;
       const stamped = stampQid(normalizeTrack(track));
       if (source) (stamped as QueuedTrack)._source = source;
+      if (sonos.isCasting()) {
+        void sonos.insertNext([stamped]);
+        return;
+      }
       store.set(manualQueueAtom, [stamped, ...store.get(manualQueueAtom)]);
     },
-    [store],
+    [store, sonos],
   );
 
   const setQueueTracks = useCallback(
@@ -367,6 +394,7 @@ export function usePlaybackActions() {
         const stamped = tracks.map((t) => ensureQid(normalizeTrack(t)));
         store.set(manualQueueAtom, stamped.slice(0, mc));
         store.set(queueAtom, stamped.slice(mc));
+        if (sonos.isCasting()) void sonos.replaceUpcoming(stamped);
         return;
       }
       const filterExplicit = !store.get(allowExplicitAtom);
@@ -391,7 +419,7 @@ export function usePlaybackActions() {
       );
       store.set(queueAtom, stampQids(eligible.map(normalizeTrack)));
     },
-    [store],
+    [store, sonos],
   );
 
   const appendToQueue = useCallback(
@@ -399,6 +427,10 @@ export function usePlaybackActions() {
       const filterExplicit = !store.get(allowExplicitAtom);
       const eligible = filterExplicit ? newTracks.filter(t => !t.explicit) : newTracks;
       if (eligible.length === 0) return;
+      if (sonos.isCasting()) {
+        void sonos.appendEnd(eligible.map(normalizeTrack));
+        return;
+      }
       const stamped = stampQids(eligible.map(normalizeTrack));
 
       // Append to playbackSourceAtom.tracks
@@ -428,11 +460,15 @@ export function usePlaybackActions() {
         store.set(queueAtom, [...store.get(queueAtom), ...stamped]);
       }
     },
-    [store],
+    [store, sonos],
   );
 
   const removeFromQueue = useCallback(
     (index: number) => {
+      if (sonos.isCasting()) {
+        void sonos.removeAt(index);
+        return;
+      }
       const manual = store.get(manualQueueAtom);
       if (index < manual.length) {
         // Remove from manual queue
@@ -461,11 +497,12 @@ export function usePlaybackActions() {
         }
       }
     },
-    [store],
+    [store, sonos],
   );
 
   const playNext = useCallback(
     async (options?: { explicit?: boolean }) => {
+      if (sonos.isCasting()) return sonos.next();
       if (playNextLockRef.current) return;
       playNextLockRef.current = true;
       try {
@@ -743,10 +780,14 @@ export function usePlaybackActions() {
         playNextLockRef.current = false;
       }
     },
-    [store, playTrack],
+    [store, playTrack, sonos],
   );
 
   const playPrevious = useCallback(async () => {
+    // Casting: the same restart-past-3-s rule, against the polled position
+    if (sonos.isCasting()) {
+      return getInterpolatedPosition() > 3 ? sonos.seek(0) : sonos.previous();
+    }
     if (playNextLockRef.current) return;
     playNextLockRef.current = true;
     try {
@@ -972,7 +1013,7 @@ export function usePlaybackActions() {
     } finally {
       playNextLockRef.current = false;
     }
-  }, [store, showToast, seekTo]);
+  }, [store, showToast, seekTo, sonos]);
 
   const toggleShuffle = useCallback(() => {
     const current = store.get(shuffleAtom);
@@ -996,7 +1037,8 @@ export function usePlaybackActions() {
       store.set(originalQueueAtom, null);
       store.set(shuffleAtom, false);
     }
-  }, [store]);
+    if (sonos.isCasting()) void sonos.replaceUpcoming(store.get(queueAtom));
+  }, [store, sonos]);
 
   const setShuffledQueue = useCallback(
     (
@@ -1043,6 +1085,7 @@ export function usePlaybackActions() {
 
   const playFromQueue = useCallback(
     async (index: number) => {
+      if (sonos.isCasting()) return sonos.playIndex(index);
       const manual = store.get(manualQueueAtom);
       const queue = store.get(queueAtom);
       if (index < 0 || index >= manual.length + queue.length) return;
@@ -1080,7 +1123,7 @@ export function usePlaybackActions() {
       }
       await playTrack(track);
     },
-    [store, playTrack, showToast],
+    [store, playTrack, showToast, sonos],
   );
 
   const playFromSource = useCallback(
@@ -1167,7 +1210,8 @@ export function usePlaybackActions() {
     store.set(originalQueueAtom, null);
     store.set(playbackSourceAtom, null);
     store.set(contextSourceAtom, null);
-  }, [store]);
+    if (sonos.isCasting()) void sonos.replaceUpcoming([]);
+  }, [store, sonos]);
 
   return {
     playTrack,
