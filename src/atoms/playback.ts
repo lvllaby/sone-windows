@@ -32,3 +32,10 @@ export const exclusiveDeviceAtom = atom<string | null>(null);
 /** Consecutive auto-advance failures for unplayable tracks.
  *  Only mutated by playNext's skip-loop; reset on successful play. */
 export const consecutiveFailCountAtom = atom(0);
+
+/** Where audio is played: this device, or a Sonos group (by coordinator id). */
+export type PlaybackTarget =
+  | { type: "local" }
+  | { type: "sonos"; coordinatorId: string; name: string };
+
+export const playbackTargetAtom = atom<PlaybackTarget>({ type: "local" });

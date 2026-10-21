@@ -59,6 +59,7 @@ import { proxySettingsAtom, type ProxySettings } from "../atoms/proxy";
 import { usePlaybackActions } from "../hooks/usePlaybackActions";
 import { useFavorites } from "../hooks/useFavorites";
 import { useShortcuts } from "../hooks/useShortcuts";
+import { useSonosSync } from "../hooks/useSonosSync";
 import { useToast } from "../contexts/ToastContext";
 import {
   checkNetworkError,
@@ -159,6 +160,7 @@ export function AppInitializer() {
   const setDrawerOpen = useSetAtom(drawerOpenAtom);
   const setDecorations = useSetAtom(decorationsAtom);
   const { showToast } = useToast();
+  useSonosSync();
 
   // ---- Store for one-time reads (volume, queue, history, etc.) — no subscription ----
   const store = useStore();
