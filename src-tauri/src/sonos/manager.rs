@@ -131,6 +131,11 @@ struct Inner {
     /// Bumped by every new load/selection (and queue wipes); a running
     /// back-fill whose generation no longer matches stops.
     fill_generation: AtomicU64,
+    /// Serializes queue mutations. Foreground ops (load, insert, remove,
+    /// replace, clear, play_index) hold it for their whole duration; the
+    /// back-fill holds it for its entire prepend phase and per batch while
+    /// appending. Never held while a std `Mutex` guard is alive.
+    queue_lock: Arc<tokio::sync::Mutex<()>>,
     /// `NewUpdateID` of our own latest queue mutation.
     own_update_id: Mutex<Option<u32>>,
     /// Latest playback position seen on the selected group (written by the
@@ -185,6 +190,7 @@ impl SonosManager {
                 soap: SoapClient::new(),
                 state: Mutex::new(state),
                 fill_generation: AtomicU64::new(0),
+                queue_lock: Arc::new(tokio::sync::Mutex::new(())),
                 own_update_id: Mutex::new(None),
                 position: Mutex::new(None),
             }),
@@ -395,7 +401,11 @@ impl SonosManager {
 
     /// Replaces the coordinator's queue with `track_ids`, starts at
     /// `start_index` / `position_secs`, and back-fills the rest in the
-    /// background.
+    /// background (earlier tracks first, then the tail).
+    ///
+    /// The queue lock is held from `remove_all` through `play` and then handed
+    /// to the back-fill task, so nothing can run between the foreground part
+    /// and the start of the prepend phase.
     pub async fn load_queue(
         &self,
         track_ids: &[u64],
@@ -409,7 +419,9 @@ impl SonosManager {
         }
         // Must happen before the queue is wiped: the sn is read from it.
         let sn = self.ensure_sn(&ip).await?;
+        // Bump first so a running back-fill gives up the lock quickly.
         let generation = self.bump_generation();
+        let guard = Arc::clone(&self.inner.queue_lock).lock_owned().await;
         let plan = plan_load(track_ids, start_index);
         let soap = &self.inner.soap;
 
@@ -422,10 +434,13 @@ impl SonosManager {
             services::seek_time(soap, &ip, position_secs).await?;
         }
         // SONE never uses Sonos shuffle: keep the repeat part, drop the rest.
-        let repeat = services::get_play_mode(soap, &ip)
-            .await
-            .map(|m| services::play_mode_to_repeat(&m))
-            .unwrap_or(0);
+        let repeat = match services::get_play_mode(soap, &ip).await {
+            Ok(m) => services::play_mode_to_repeat(&m),
+            Err(e) => {
+                log::debug!("[sonos] get_play_mode failed, assuming NORMAL: {e}");
+                0
+            }
+        };
         services::set_play_mode(soap, &ip, services::repeat_to_play_mode(repeat)).await?;
         if play {
             services::play(soap, &ip).await?;
@@ -433,8 +448,10 @@ impl SonosManager {
 
         if !plan.append.is_empty() || !plan.prepend.is_empty() {
             let this = self.clone();
+            // The owned guard moves into the task: no gap in which another
+            // queue op could run before the prepend phase starts.
             tauri::async_runtime::spawn(async move {
-                this.run_backfill(ip, sn, generation, plan).await;
+                this.run_backfill(guard, ip, sn, generation, plan).await;
             });
         }
         Ok(())
@@ -458,17 +475,20 @@ impl SonosManager {
         }
     }
 
-    async fn run_backfill(&self, ip: String, sn: u32, generation: u64, plan: LoadPlan) {
-        for chunk in plan.append.chunks(ADD_BATCH) {
-            if !self.fill_ok(&ip, generation).await {
-                return;
-            }
-            if let Err(e) = self.add_tracks(&ip, sn, chunk, 0).await {
-                log::warn!("[sonos] back-fill append failed: {e}");
-                return;
-            }
-        }
-        // Earlier tracks go in front of the already-playing start track.
+    /// Back-fill order: earlier tracks first (inserted before the playing
+    /// start track), then the tail. `prepend_guard` (the queue lock handed
+    /// over by `load_queue`) is held for the whole prepend phase, so
+    /// foreground index ops never see a half-inserted prepend and a
+    /// generation bump can only cancel the remaining append batches. The
+    /// append phase takes the lock per batch.
+    async fn run_backfill(
+        &self,
+        prepend_guard: tokio::sync::OwnedMutexGuard<()>,
+        ip: String,
+        sn: u32,
+        generation: u64,
+        plan: LoadPlan,
+    ) {
         let mut at = 1u32;
         for chunk in plan.prepend.chunks(ADD_BATCH) {
             if !self.fill_ok(&ip, generation).await {
@@ -480,18 +500,32 @@ impl SonosManager {
             }
             at += chunk.len() as u32;
         }
+        drop(prepend_guard);
+
+        for chunk in plan.append.chunks(ADD_BATCH) {
+            let _guard = self.inner.queue_lock.lock().await;
+            if !self.fill_ok(&ip, generation).await {
+                return;
+            }
+            if let Err(e) = self.add_tracks(&ip, sn, chunk, 0).await {
+                log::warn!("[sonos] back-fill append failed: {e}");
+                return;
+            }
+        }
     }
 
     /// Inserts `ids` before 0-based queue index `at`.
     pub async fn queue_insert(&self, ids: &[u64], at: usize) -> Result<(), SoneError> {
         let (_, ip) = self.selected_coordinator()?;
         let sn = self.ensure_sn(&ip).await?;
+        let _guard = self.inner.queue_lock.lock().await;
         self.add_tracks(&ip, sn, ids, queue_position(at)).await
     }
 
     /// Removes the track at 0-based queue index `index`.
     pub async fn queue_remove(&self, index: usize) -> Result<(), SoneError> {
         let (_, ip) = self.selected_coordinator()?;
+        let _guard = self.inner.queue_lock.lock().await;
         let update_id = services::browse(&self.inner.soap, &ip, "Q:0", 0, 1)
             .await?
             .update_id;
@@ -506,8 +540,11 @@ impl SonosManager {
     pub async fn queue_replace_after(&self, index: usize, ids: &[u64]) -> Result<(), SoneError> {
         let (_, ip) = self.selected_coordinator()?;
         let sn = self.ensure_sn(&ip).await?;
-        // A running back-fill would re-add the tail we are replacing.
+        // A running back-fill would re-add the tail we are replacing; the
+        // bump cancels its remaining append batches (a pending prepend phase
+        // holds the lock, so we wait for it and indices stay valid).
         self.bump_generation();
+        let _guard = self.inner.queue_lock.lock().await;
         let browsed = services::browse(&self.inner.soap, &ip, "Q:0", 0, 1).await?;
         let keep = index.saturating_add(1);
         let total = browsed.total_matches as usize;
@@ -530,6 +567,7 @@ impl SonosManager {
     pub async fn queue_clear(&self) -> Result<(), SoneError> {
         let (_, ip) = self.selected_coordinator()?;
         self.bump_generation();
+        let _guard = self.inner.queue_lock.lock().await;
         services::remove_all(&self.inner.soap, &ip).await?;
         self.set_own_update_id(None);
         Ok(())
@@ -565,6 +603,7 @@ impl SonosManager {
     /// Jumps to 0-based queue index `index` and plays.
     pub async fn play_index(&self, index: usize) -> Result<(), SoneError> {
         let (_, ip) = self.selected_coordinator()?;
+        let _guard = self.inner.queue_lock.lock().await;
         services::seek_track(&self.inner.soap, &ip, queue_position(index)).await?;
         services::play(&self.inner.soap, &ip).await
     }

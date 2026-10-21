@@ -19,12 +19,12 @@ fn persist_sn(state: &AppState) -> Result<(), SoneError> {
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub async fn sonos_get_snapshot(state: State<'_, AppState>) -> Result<SonosSnapshot, SoneError> {
     Ok(state.sonos.snapshot().await)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub async fn sonos_rescan(state: State<'_, AppState>) -> Result<Vec<SonosGroup>, SoneError> {
     log::debug!("[sonos_rescan]");
     state.sonos.refresh_topology().await
@@ -98,22 +98,22 @@ pub async fn sonos_load_queue(
     result
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub async fn sonos_play(state: State<'_, AppState>) -> Result<(), SoneError> {
     state.sonos.play().await
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub async fn sonos_pause(state: State<'_, AppState>) -> Result<(), SoneError> {
     state.sonos.pause().await
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub async fn sonos_next(state: State<'_, AppState>) -> Result<(), SoneError> {
     state.sonos.next().await
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub async fn sonos_previous(state: State<'_, AppState>) -> Result<(), SoneError> {
     state.sonos.previous().await
 }
@@ -159,12 +159,12 @@ pub async fn sonos_queue_replace_after(
     result
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub async fn sonos_queue_clear(state: State<'_, AppState>) -> Result<(), SoneError> {
     state.sonos.queue_clear().await
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub async fn sonos_set_group_volume(
     state: State<'_, AppState>,
     volume: u8,
@@ -181,12 +181,12 @@ pub async fn sonos_set_member_volume(
     state.sonos.set_member_volume(&member_id, volume).await
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub async fn sonos_set_mute(state: State<'_, AppState>, muted: bool) -> Result<(), SoneError> {
     state.sonos.set_mute(muted).await
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub async fn sonos_set_play_mode(state: State<'_, AppState>, repeat: u8) -> Result<(), SoneError> {
     state.sonos.set_play_mode(repeat).await
 }
