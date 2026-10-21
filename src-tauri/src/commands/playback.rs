@@ -189,6 +189,9 @@ pub fn set_volume(state: State<'_, AppState>, level: f32) -> Result<(), SoneErro
 
 #[tauri::command]
 pub fn get_playback_position(state: State<'_, AppState>) -> Result<f32, SoneError> {
+    if let Some(position) = state.sonos.casting_position() {
+        return Ok(position);
+    }
     state.audio_player.get_position().map_err(SoneError::Audio)
 }
 

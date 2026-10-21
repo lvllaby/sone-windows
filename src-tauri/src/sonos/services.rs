@@ -9,6 +9,7 @@ use serde::Serialize;
 use crate::error::SoneError;
 use crate::sonos::soap::{format_hms, parse_hms, Service, SoapClient};
 
+#[allow(dead_code)] // used by the Task 6 poller
 #[derive(Debug, Clone, Copy, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum TransportState {
@@ -59,6 +60,7 @@ pub fn play_mode_to_repeat(mode: &str) -> u8 {
     }
 }
 
+#[allow(dead_code)] // used by the Task 6 poller
 /// Unknown or missing states map to `Stopped`.
 pub fn parse_transport_state(map: &HashMap<String, String>) -> TransportState {
     match map.get("CurrentTransportState").map(String::as_str) {
@@ -267,6 +269,7 @@ pub async fn set_play_mode(soap: &SoapClient, ip: &str, mode: &str) -> Result<()
         .map(drop)
 }
 
+#[allow(dead_code)] // used by the Task 6 poller
 pub async fn transport_state(soap: &SoapClient, ip: &str) -> Result<TransportState, SoneError> {
     Ok(parse_transport_state(
         &av(soap, ip, "GetTransportInfo", &[]).await?,
@@ -310,6 +313,7 @@ pub async fn browse(
     Ok(parse_browse(&r))
 }
 
+#[allow(dead_code)] // used by the Task 6 poller
 /// Group volume (0-100); call on the group coordinator.
 pub async fn get_group_volume(soap: &SoapClient, ip: &str) -> Result<u8, SoneError> {
     let r = soap
@@ -335,6 +339,7 @@ pub async fn set_group_volume(soap: &SoapClient, ip: &str, vol: u8) -> Result<()
     .map(drop)
 }
 
+#[allow(dead_code)] // used by the Task 6 poller
 pub async fn get_group_mute(soap: &SoapClient, ip: &str) -> Result<bool, SoneError> {
     let r = soap
         .call(
@@ -361,6 +366,7 @@ pub async fn set_group_mute(soap: &SoapClient, ip: &str, mute: bool) -> Result<(
     .map(drop)
 }
 
+#[allow(dead_code)] // used by the Task 6 poller
 /// Per-speaker volume (0-100).
 pub async fn get_volume(soap: &SoapClient, ip: &str) -> Result<u8, SoneError> {
     let r = soap
@@ -390,6 +396,7 @@ pub async fn set_volume(soap: &SoapClient, ip: &str, vol: u8) -> Result<(), Sone
     .map(drop)
 }
 
+#[allow(dead_code)] // used by the Task 6 poller
 /// Raw `ZoneGroupState` XML string (parsed by `topology`).
 pub async fn zone_group_state(soap: &SoapClient, ip: &str) -> Result<String, SoneError> {
     let r = soap

@@ -13,7 +13,6 @@ mod mpris;
 #[cfg(target_os = "windows")]
 mod media_controls;
 mod scrobble;
-#[allow(dead_code)]
 mod sonos;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod tray;
@@ -149,6 +148,15 @@ pub struct Settings {
     /// on the device-code (LoginCode) auth method. Caps at 5; never resets.
     #[serde(default)]
     pub legacy_auth_notice_count: u8,
+    /// Coordinator of the Sonos group SONE was last casting to.
+    #[serde(default)]
+    pub sonos_last_coordinator: Option<String>,
+    /// TIDAL account serial (`sn=`) used in Sonos track URIs.
+    #[serde(default)]
+    pub sonos_tidal_sn: Option<u32>,
+    /// Manually configured speaker IP, used when discovery cannot find any.
+    #[serde(default)]
+    pub sonos_manual_ip: Option<String>,
 }
 
 impl Default for Settings {
@@ -172,6 +180,9 @@ impl Default for Settings {
             discord_rpc: true,
             discord_status_text: String::new(),
             legacy_auth_notice_count: 0,
+            sonos_last_coordinator: None,
+            sonos_tidal_sn: None,
+            sonos_manual_ip: None,
         }
     }
 }
@@ -203,6 +214,7 @@ pub struct AppState {
     pub scrobble_manager: scrobble::ScrobbleManager,
     pub discord: discord::DiscordHandle,
     pub idle_inhibitor: Mutex<idle_inhibit::IdleInhibitor>,
+    pub sonos: sonos::SonosManager,
 }
 
 pub fn now_secs() -> u64 {
@@ -319,6 +331,8 @@ impl AppState {
             discord_handle.send(discord::DiscordCommand::Connect);
         }
 
+        let sonos = sonos::SonosManager::new(&saved.clone().unwrap_or_default());
+
         Self {
             audio_player: AudioPlayer::new(app_handle.clone()),
             tidal_client: Mutex::new(TidalClient::new(&proxy_settings)),
@@ -342,6 +356,7 @@ impl AppState {
             scrobble_manager,
             discord: discord_handle,
             idle_inhibitor: Mutex::new(idle_inhibit::IdleInhibitor::new()),
+            sonos,
         }
     }
 
@@ -671,6 +686,27 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            // sonos
+            commands::sonos::sonos_get_snapshot,
+            commands::sonos::sonos_rescan,
+            commands::sonos::sonos_set_manual_ip,
+            commands::sonos::sonos_select_group,
+            commands::sonos::sonos_group_now_playing,
+            commands::sonos::sonos_load_queue,
+            commands::sonos::sonos_play,
+            commands::sonos::sonos_pause,
+            commands::sonos::sonos_next,
+            commands::sonos::sonos_previous,
+            commands::sonos::sonos_seek,
+            commands::sonos::sonos_play_index,
+            commands::sonos::sonos_queue_insert,
+            commands::sonos::sonos_queue_remove,
+            commands::sonos::sonos_queue_replace_after,
+            commands::sonos::sonos_queue_clear,
+            commands::sonos::sonos_set_group_volume,
+            commands::sonos::sonos_set_member_volume,
+            commands::sonos::sonos_set_mute,
+            commands::sonos::sonos_set_play_mode,
             // auth
             commands::auth::greet,
             commands::auth::load_saved_auth,

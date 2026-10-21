@@ -196,6 +196,35 @@ pub fn parse_didl_items(didl: &str, speaker_ip: &str) -> Vec<QueueItem> {
     items
 }
 
+/// Text of every `<res>` element in a DIDL-Lite document (XML-unescaped once),
+/// in document order. Used to read the raw URIs `QueueItem` doesn't carry.
+pub fn didl_res_uris(didl: &str) -> Vec<String> {
+    let mut reader = Reader::from_str(didl);
+    reader.config_mut().trim_text(true);
+    let mut uris = Vec::new();
+    let mut current: Option<String> = None;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) if e.local_name().as_ref() == b"res" => {
+                current = Some(String::new());
+            }
+            Ok(Event::Text(t)) => {
+                if let (Some(uri), Ok(text)) = (current.as_mut(), t.unescape()) {
+                    uri.push_str(&text);
+                }
+            }
+            Ok(Event::End(e)) if e.local_name().as_ref() == b"res" => {
+                if let Some(uri) = current.take().filter(|u| !u.is_empty()) {
+                    uris.push(uri);
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+    }
+    uris
+}
+
 /// Account serial (`sn=`) of the first TIDAL URI in `uris`.
 pub fn find_tidal_sn<'a>(uris: impl IntoIterator<Item = &'a str>) -> Option<u32> {
     uris.into_iter()
@@ -285,6 +314,16 @@ mod tests {
             items[0].album_art_url.as_deref(),
             Some("https://example.com/a.jpg")
         );
+    }
+
+    #[test]
+    fn res_uris_from_queue_fixture() {
+        let body = include_str!("fixtures/browse_queue.xml");
+        let didl = parse_response(body, "Browse").unwrap()["Result"].clone();
+        let uris = didl_res_uris(&didl);
+        assert_eq!(uris.len(), 4);
+        assert!(uris.iter().all(|u| u.starts_with("x-sonos-http:track%2f")));
+        assert_eq!(find_tidal_sn(uris.iter().map(String::as_str)), Some(3));
     }
 
     #[test]
