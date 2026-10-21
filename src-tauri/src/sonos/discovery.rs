@@ -76,9 +76,10 @@ pub async fn discover(timeout: Duration) -> Vec<String> {
             }
             let deadline = Instant::now() + timeout;
             let mut buf = [0u8; 2048];
-            while let Ok(Ok((n, _))) =
-                tokio::time::timeout_at(deadline, sock.recv_from(&mut buf)).await
-            {
+            // Skip I/O errors (Windows reports WSAECONNRESET / 10054 on a UDP
+            // socket after an ICMP unreachable) and stop only at the deadline.
+            while let Ok(res) = tokio::time::timeout_at(deadline, sock.recv_from(&mut buf)).await {
+                let Ok((n, _)) = res else { continue };
                 if let Some(ip) = parse_ssdp_location(&String::from_utf8_lossy(&buf[..n])) {
                     let _ = tx.send(ip);
                 }

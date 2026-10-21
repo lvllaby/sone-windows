@@ -4,15 +4,16 @@
 //! All shared state sits behind a `std::sync::Mutex` that is never held across
 //! an `.await`; network calls work on values cloned out of it.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use tauri::{AppHandle, Emitter};
 
 use crate::error::SoneError;
 use crate::sonos::discovery::{discover, fetch_topology};
-use crate::sonos::services;
+use crate::sonos::services::{self, TransportState};
 use crate::sonos::soap::SoapClient;
 use crate::sonos::tidal::{
     build_track_didl, build_track_uri, classify_uri, didl_res_uris, find_tidal_sn,
@@ -33,6 +34,116 @@ const ADD_BATCH: usize = 16;
 const SN_SOURCES: [&str; 3] = ["Q:0", "FV:2", "R:0/0"];
 const SN_BROWSE_COUNT: u32 = 100;
 const DISCOVERY_TIMEOUT: Duration = Duration::from_millis(2500);
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// `sonos-state` is re-sent at least this often so the frontend re-anchors
+/// its position interpolation.
+const STATE_REANCHOR: Duration = Duration::from_secs(5);
+const TOPOLOGY_REFRESH: Duration = Duration::from_secs(30);
+const TOPOLOGY_RETRY_EMPTY: Duration = Duration::from_secs(60);
+/// Sonos caps `RequestedCount` at 100.
+const QUEUE_PAGE: u32 = 100;
+const RECONNECTING_AFTER_FAILURES: u32 = 3;
+const LOST_AFTER: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Reachability {
+    Ok,
+    Reconnecting,
+    Lost,
+}
+
+/// Turns a stream of poll successes/failures into a [`Reachability`]:
+/// 3 consecutive failures = Reconnecting, 30 s since the first failure = Lost,
+/// any success = Ok.
+#[derive(Default)]
+pub struct ReachTracker {
+    failures: u32,
+    first_failure: Option<Instant>,
+}
+
+impl ReachTracker {
+    pub fn record(&mut self, ok: bool, now: Instant) -> Reachability {
+        if ok {
+            self.failures = 0;
+            self.first_failure = None;
+            return Reachability::Ok;
+        }
+        self.failures += 1;
+        let first = *self.first_failure.get_or_insert(now);
+        if now.saturating_duration_since(first) >= LOST_AFTER {
+            Reachability::Lost
+        } else if self.failures >= RECONNECTING_AFTER_FAILURES {
+            Reachability::Reconnecting
+        } else {
+            Reachability::Ok
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberVolume {
+    pub member_id: String,
+    pub volume: u8,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SonosState {
+    pub coordinator_id: String,
+    pub transport_state: TransportState,
+    /// 0-based queue index; `None` when not playing from the queue (TV input).
+    pub track_index: Option<usize>,
+    pub position_secs: f64,
+    pub duration_secs: Option<f64>,
+    pub group_volume: u8,
+    pub muted: bool,
+    pub member_volumes: Vec<MemberVolume>,
+    pub repeat: u8,
+    pub current_item: Option<QueueItem>,
+    pub reachability: Reachability,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SonosQueue {
+    pub coordinator_id: String,
+    pub update_id: u32,
+    pub items: Vec<QueueItem>,
+}
+
+/// The group stopped by itself mid-queue (not at the end, not by SONE, not the
+/// TV input): playback was interrupted, e.g. a track became unavailable.
+pub fn detect_unexpected_stop(
+    prev: &SonosState,
+    next: &SonosState,
+    queue_len: usize,
+    user_stopped: bool,
+) -> bool {
+    if user_stopped
+        || prev.transport_state != TransportState::Playing
+        || next.transport_state != TransportState::Stopped
+    {
+        return false;
+    }
+    matches!(next.track_index, Some(i) if i + 1 < queue_len)
+}
+
+/// Whether `next` should be emitted: first state, any change besides the
+/// position, or the re-anchor interval elapsed.
+pub fn state_needs_emit(
+    last: Option<&SonosState>,
+    next: &SonosState,
+    since_last_emit: Duration,
+) -> bool {
+    let Some(last) = last else { return true };
+    let mut a = last.clone();
+    a.position_secs = 0.0;
+    let mut b = next.clone();
+    b.position_secs = 0.0;
+    a != b || since_last_emit >= STATE_REANCHOR
+}
 
 pub struct LoadPlan {
     /// Tracks before the start track; inserted at position 1 by the back-fill.
@@ -141,6 +252,13 @@ struct Inner {
     /// Latest playback position seen on the selected group (written by the
     /// poller); `None` until one is recorded.
     position: Mutex<Option<f32>>,
+    /// Set by SONE's own pause / queue_clear / load_queue; cleared by the
+    /// poller on the next observed Playing. Suppresses the unexpected-stop error.
+    user_stopped: AtomicBool,
+    /// Set by `start`; the poller emits through it.
+    app: Mutex<Option<AppHandle>>,
+    /// The running poller for the selected group (at most one).
+    poller: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
 }
 
 /// Cheaply cloneable handle (the back-fill task holds a clone).
@@ -193,6 +311,9 @@ impl SonosManager {
                 queue_lock: Arc::new(tokio::sync::Mutex::new(())),
                 own_update_id: Mutex::new(None),
                 position: Mutex::new(None),
+                user_stopped: AtomicBool::new(false),
+                app: Mutex::new(None),
+                poller: Mutex::new(None),
             }),
         }
     }
@@ -206,8 +327,7 @@ impl SonosManager {
         *lock(&self.inner.position)
     }
 
-    /// Written by the poller (Task 6).
-    #[allow(dead_code)]
+    /// Written by the poller.
     pub fn record_position(&self, position: Option<f32>) {
         *lock(&self.inner.position) = position;
     }
@@ -256,27 +376,51 @@ impl SonosManager {
         }
     }
 
-    /// Re-discovers speakers (plus the manual IP) and reloads the topology.
+    /// Reloads the topology: from the manual IP when set (falling back to
+    /// SSDP discovery if that fails), otherwise from SSDP.
     pub async fn refresh_topology(&self) -> Result<Vec<SonosGroup>, SoneError> {
         let manual = lock(&self.inner.state).manual_ip.clone();
-        let mut seeds: Vec<String> = manual.into_iter().collect();
-        for ip in discover(DISCOVERY_TIMEOUT).await {
-            if !seeds.contains(&ip) {
-                seeds.push(ip);
+        let mut result = Err(SoneError::Sonos("no Sonos speakers to query".into()));
+        if let Some(ip) = manual {
+            result = fetch_topology(&self.inner.soap, &[ip]).await;
+        }
+        if result.is_err() {
+            let seeds = discover(DISCOVERY_TIMEOUT).await;
+            if !seeds.is_empty() {
+                result = fetch_topology(&self.inner.soap, &seeds).await;
+            } else if lock(&self.inner.state).manual_ip.is_none() {
+                // Nothing answered: an empty, completed scan.
+                result = Ok(Vec::new());
             }
         }
-        if seeds.is_empty() {
-            let mut st = lock(&self.inner.state);
-            st.groups.clear();
-            st.scanned = true;
-            return Ok(Vec::new());
-        }
-        let result = fetch_topology(&self.inner.soap, &seeds).await;
         let mut st = lock(&self.inner.state);
         st.scanned = true;
         let groups = result?;
         st.groups = groups.clone();
         Ok(groups)
+    }
+
+    /// Discovers speakers in the background: emits `sonos-topology` after each
+    /// refresh, every 30 s (every 60 s while no group was found). Also hands
+    /// the app handle to the poller.
+    pub fn start(&self, app: AppHandle) {
+        *lock(&self.inner.app) = Some(app.clone());
+        let this = self.clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                if let Err(e) = this.refresh_topology().await {
+                    log::debug!("[sonos] topology refresh failed: {e}");
+                }
+                let groups = lock(&this.inner.state).groups.clone();
+                let _ = app.emit("sonos-topology", &groups);
+                tokio::time::sleep(if groups.is_empty() {
+                    TOPOLOGY_RETRY_EMPTY
+                } else {
+                    TOPOLOGY_REFRESH
+                })
+                .await;
+            }
+        });
     }
 
     /// Validates and stores the manual speaker IP (persisting is the
@@ -290,6 +434,9 @@ impl SonosManager {
     /// Selects the casting group (or none). `forget_last` only matters for
     /// `None`: it also clears the remembered coordinator.
     pub fn select(&self, coordinator_id: Option<String>, forget_last: bool) {
+        // Stop the old poller first so it cannot record a stale position
+        // after the reset below.
+        self.stop_poller();
         {
             let mut st = lock(&self.inner.state);
             match &coordinator_id {
@@ -305,8 +452,26 @@ impl SonosManager {
         self.on_selection_changed();
     }
 
-    /// Seam for Task 6: start/stop the poller for the new selection.
-    fn on_selection_changed(&self) {}
+    /// Starts the poller for the new selection (none for `select(None)`).
+    fn on_selection_changed(&self) {
+        let Some(id) = lock(&self.inner.state).selected.clone() else {
+            return;
+        };
+        let Some(app) = lock(&self.inner.app).clone() else {
+            return;
+        };
+        let this = self.clone();
+        let handle = tauri::async_runtime::spawn(async move {
+            this.poll_loop(app, id).await;
+        });
+        *lock(&self.inner.poller) = Some(handle);
+    }
+
+    fn stop_poller(&self) {
+        if let Some(h) = lock(&self.inner.poller).take() {
+            h.abort();
+        }
+    }
 
     /// (coordinator id, coordinator ip) of the selected group.
     fn selected_coordinator(&self) -> Result<(String, String), SoneError> {
@@ -427,6 +592,7 @@ impl SonosManager {
         let guard = Arc::clone(&self.inner.queue_lock).lock_owned().await;
         let plan = plan_load(track_ids, start_index);
         let soap = &self.inner.soap;
+        self.inner.user_stopped.store(true, Ordering::SeqCst);
 
         services::remove_all(soap, &ip).await?;
         // From here on a failure leaves the speaker's queue empty/partial.
@@ -583,9 +749,209 @@ impl SonosManager {
         // only the remaining append batches.
         let _guard = self.inner.queue_lock.lock().await;
         self.bump_generation();
+        self.inner.user_stopped.store(true, Ordering::SeqCst);
         services::remove_all(&self.inner.soap, &ip).await?;
         self.set_own_update_id(None);
         Ok(())
+    }
+
+    // ---- poller -----------------------------------------------------------
+
+    /// (coordinator ip, visible members as (id, ip)) of a group.
+    fn poll_target(&self, coordinator_id: &str) -> Option<(String, Vec<(String, String)>)> {
+        let st = lock(&self.inner.state);
+        let g = st
+            .groups
+            .iter()
+            .find(|g| g.coordinator_id == coordinator_id)?;
+        let ip = g.members.first()?.ip.clone();
+        Some((
+            ip,
+            g.members
+                .iter()
+                .map(|m| (m.id.clone(), m.ip.clone()))
+                .collect(),
+        ))
+    }
+
+    /// One poll of the coordinator. Transport state and position are the
+    /// liveness probe (their failure is an error); the rest falls back to the
+    /// previous values.
+    async fn read_state(
+        &self,
+        coordinator_id: &str,
+        ip: &str,
+        members: &[(String, String)],
+        prev: Option<&SonosState>,
+    ) -> Result<SonosState, SoneError> {
+        let soap = &self.inner.soap;
+        let transport_state = services::transport_state(soap, ip).await?;
+        let info = services::position_info(soap, ip).await?;
+        let (vol, mute, mode) = tokio::join!(
+            services::get_group_volume(soap, ip),
+            services::get_group_mute(soap, ip),
+            services::get_play_mode(soap, ip),
+        );
+        let mut member_volumes = Vec::with_capacity(members.len());
+        for (id, mip) in members {
+            let volume = match services::get_volume(soap, mip).await {
+                Ok(v) => Some(v),
+                Err(_) => prev
+                    .and_then(|p| p.member_volumes.iter().find(|m| &m.member_id == id))
+                    .map(|m| m.volume),
+            };
+            if let Some(volume) = volume {
+                member_volumes.push(MemberVolume {
+                    member_id: id.clone(),
+                    volume,
+                });
+            }
+        }
+
+        let is_tv = classify_uri(&info.track_uri) == QueueItemKind::Tv;
+        let current_item = if is_tv {
+            Some(QueueItem {
+                kind: QueueItemKind::Tv,
+                tidal_track_id: None,
+                title: "TV".into(),
+                artist: String::new(),
+                album_art_url: None,
+                duration_secs: None,
+            })
+        } else if info.track_uri.is_empty() {
+            None
+        } else {
+            parse_didl_items(&info.track_meta, ip).into_iter().next()
+        };
+        // 1-based on Sonos (0 = none); the TV input is not a queue position.
+        let track_index = if is_tv || info.track_number == 0 {
+            None
+        } else {
+            Some(info.track_number as usize - 1)
+        };
+        Ok(SonosState {
+            coordinator_id: coordinator_id.to_string(),
+            transport_state,
+            track_index,
+            position_secs: if is_tv { 0.0 } else { info.position_secs },
+            duration_secs: if is_tv { None } else { info.duration_secs },
+            group_volume: vol.ok().or(prev.map(|p| p.group_volume)).unwrap_or(0),
+            muted: mute.ok().or(prev.map(|p| p.muted)).unwrap_or(false),
+            member_volumes,
+            repeat: mode
+                .ok()
+                .map(|m| services::play_mode_to_repeat(&m))
+                .or(prev.map(|p| p.repeat))
+                .unwrap_or(0),
+            current_item,
+            reachability: Reachability::Ok,
+        })
+    }
+
+    /// Browses the whole queue in pages of [`QUEUE_PAGE`].
+    async fn read_queue(&self, ip: &str) -> Result<(u32, Vec<QueueItem>), SoneError> {
+        let mut items = Vec::new();
+        let mut start = 0u32;
+        loop {
+            let page = services::browse(&self.inner.soap, ip, "Q:0", start, QUEUE_PAGE).await?;
+            items.extend(parse_didl_items(&page.didl, ip));
+            start += page.number_returned;
+            if page.number_returned == 0 || start >= page.total_matches {
+                return Ok((page.update_id, items));
+            }
+        }
+    }
+
+    /// Polls the selected group's coordinator once a second until aborted.
+    async fn poll_loop(self, app: AppHandle, coordinator_id: String) {
+        let mut interval = tokio::time::interval(POLL_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut tracker = ReachTracker::default();
+        let mut prev: Option<SonosState> = None;
+        let mut last_emit = Instant::now();
+        let mut queue_update_id: Option<u32> = None;
+        let mut queue_len = 0usize;
+        loop {
+            interval.tick().await;
+            let Some((ip, members)) = self.poll_target(&coordinator_id) else {
+                continue;
+            };
+            let now = Instant::now();
+            let mut state = match self
+                .read_state(&coordinator_id, &ip, &members, prev.as_ref())
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    log::debug!("[sonos] poll failed: {e}");
+                    let reach = tracker.record(false, now);
+                    // Surface a reachability change even without fresh data.
+                    if let Some(p) = prev.as_mut() {
+                        if p.reachability != reach {
+                            p.reachability = reach;
+                            let _ = app.emit("sonos-state", &*p);
+                            last_emit = now;
+                        }
+                    }
+                    continue;
+                }
+            };
+            state.reachability = tracker.record(true, now);
+            self.record_position(Some(state.position_secs as f32));
+
+            // Queue change detection.
+            match services::browse(&self.inner.soap, &ip, "Q:0", 0, 1).await {
+                Ok(b) if queue_update_id != Some(b.update_id) => {
+                    // A change that is neither our last emitted view nor our own
+                    // write is a foreign edit: cancel any running back-fill. If
+                    // the queue lock is held, an own mutation is in flight, so
+                    // skip. The first observation after selecting has no
+                    // baseline to compare against.
+                    if queue_update_id.is_some() {
+                        if let Ok(_free) = self.inner.queue_lock.try_lock() {
+                            if self.own_update_id() != Some(b.update_id) {
+                                self.bump_generation();
+                            }
+                        }
+                    }
+                    match self.read_queue(&ip).await {
+                        Ok((update_id, items)) => {
+                            queue_len = items.len();
+                            queue_update_id = Some(update_id);
+                            let _ = app.emit(
+                                "sonos-queue",
+                                &SonosQueue {
+                                    coordinator_id: coordinator_id.clone(),
+                                    update_id,
+                                    items,
+                                },
+                            );
+                        }
+                        Err(e) => log::debug!("[sonos] queue read failed: {e}"),
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => log::debug!("[sonos] queue probe failed: {e}"),
+            }
+
+            if state.transport_state == TransportState::Playing {
+                self.inner.user_stopped.store(false, Ordering::SeqCst);
+            } else if let Some(p) = &prev {
+                let user_stopped = self.inner.user_stopped.load(Ordering::SeqCst);
+                if detect_unexpected_stop(p, &state, queue_len, user_stopped) {
+                    let _ = app.emit(
+                        "sonos-playback-error",
+                        serde_json::json!({ "kind": "unavailable" }),
+                    );
+                }
+            }
+
+            if state_needs_emit(prev.as_ref(), &state, now.duration_since(last_emit)) {
+                let _ = app.emit("sonos-state", &state);
+                last_emit = now;
+            }
+            prev = Some(state);
+        }
     }
 
     // ---- transport ----------------------------------------------------------
@@ -597,6 +963,7 @@ impl SonosManager {
 
     pub async fn pause(&self) -> Result<(), SoneError> {
         let (_, ip) = self.selected_coordinator()?;
+        self.inner.user_stopped.store(true, Ordering::SeqCst);
         services::pause(&self.inner.soap, &ip).await
     }
 
@@ -711,5 +1078,83 @@ mod tests {
     fn frontend_index_is_zero_based_sonos_is_one_based() {
         assert_eq!(queue_position(0), 1);
         assert_eq!(queue_position(41), 42);
+    }
+
+    fn st(transport: TransportState, idx: Option<usize>) -> SonosState {
+        SonosState {
+            coordinator_id: "RINCON_A".into(),
+            transport_state: transport,
+            track_index: idx,
+            position_secs: 10.0,
+            duration_secs: Some(200.0),
+            group_volume: 30,
+            muted: false,
+            member_volumes: vec![MemberVolume {
+                member_id: "RINCON_A".into(),
+                volume: 30,
+            }],
+            repeat: 0,
+            current_item: None,
+            reachability: Reachability::Ok,
+        }
+    }
+
+    #[test]
+    fn reach_tracker_transitions() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let mut r = ReachTracker::default();
+        assert_eq!(r.record(false, t0), Reachability::Ok);
+        assert_eq!(r.record(false, t0 + s(1)), Reachability::Ok);
+        assert_eq!(r.record(false, t0 + s(2)), Reachability::Reconnecting);
+        assert_eq!(r.record(false, t0 + s(30)), Reachability::Lost);
+        assert_eq!(r.record(true, t0 + s(31)), Reachability::Ok);
+        // A success resets the failure window.
+        assert_eq!(r.record(false, t0 + s(100)), Reachability::Ok);
+    }
+
+    #[test]
+    fn unexpected_stop_detected_mid_queue() {
+        let prev = st(TransportState::Playing, Some(2));
+        let next = st(TransportState::Stopped, Some(2));
+        assert!(detect_unexpected_stop(&prev, &next, 10, false));
+    }
+
+    #[test]
+    fn stop_at_queue_end_is_not_unexpected() {
+        let prev = st(TransportState::Playing, Some(9));
+        let next = st(TransportState::Stopped, Some(9));
+        assert!(!detect_unexpected_stop(&prev, &next, 10, false));
+        let prev = st(TransportState::Playing, Some(2));
+        let next = st(TransportState::Stopped, Some(2));
+        assert!(!detect_unexpected_stop(&prev, &next, 10, true));
+    }
+
+    #[test]
+    fn stop_from_non_playing_or_tv_is_not_unexpected() {
+        let prev = st(TransportState::Paused, Some(2));
+        let next = st(TransportState::Stopped, Some(2));
+        assert!(!detect_unexpected_stop(&prev, &next, 10, false));
+        let prev = st(TransportState::Playing, None);
+        let next = st(TransportState::Stopped, None);
+        assert!(!detect_unexpected_stop(&prev, &next, 10, false));
+    }
+
+    #[test]
+    fn state_emission_cadence() {
+        let a = st(TransportState::Playing, Some(1));
+        let mut moved = a.clone();
+        moved.position_secs = 55.0;
+        let short = Duration::from_secs(1);
+        assert!(state_needs_emit(None, &a, short));
+        // Only the position moved: wait for the 5 s re-anchor.
+        assert!(!state_needs_emit(Some(&a), &moved, short));
+        assert!(state_needs_emit(Some(&a), &moved, Duration::from_secs(5)));
+        let mut louder = a.clone();
+        louder.group_volume = 31;
+        assert!(state_needs_emit(Some(&a), &louder, short));
+        let mut lost = a.clone();
+        lost.reachability = Reachability::Lost;
+        assert!(state_needs_emit(Some(&a), &lost, short));
     }
 }

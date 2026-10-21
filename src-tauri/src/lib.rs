@@ -469,6 +469,9 @@ pub fn run() {
                 });
             }
 
+            // Sonos: background discovery and topology refresh
+            app.state::<AppState>().sonos.start(app.handle().clone());
+
             // Initialize scrobble providers from saved credentials
             {
                 let handle = app.handle().clone();
