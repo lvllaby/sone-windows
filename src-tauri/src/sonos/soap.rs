@@ -83,9 +83,16 @@ pub fn parse_response(body: &str, action: &str) -> Result<HashMap<String, String
                     current = Some(name);
                 }
             }
-            Event::Empty(e) if in_response && current.is_none() => {
+            Event::Empty(e) => {
                 let name = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
-                map.insert(name, String::new());
+                if !in_response {
+                    if name == wanted {
+                        found = true;
+                        break;
+                    }
+                } else if current.is_none() {
+                    map.insert(name, String::new());
+                }
             }
             Event::Text(t) => {
                 if let Some(name) = &current {
@@ -173,7 +180,7 @@ impl SoapClient {
             .no_proxy()
             .timeout(Duration::from_secs(3))
             .build()
-            .unwrap_or_default();
+            .expect("failed to build Sonos HTTP client");
         Self { http }
     }
 
@@ -239,6 +246,12 @@ mod tests {
         assert_eq!(map["TrackMetaData"], "<DIDL-Lite>a &amp; b</DIDL-Lite>");
         assert_eq!(map["Empty"], "");
         assert_eq!(map["Empty2"], "");
+    }
+
+    #[test]
+    fn parse_response_accepts_self_closing_response() {
+        let body = r#"<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:PlayResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"/></s:Body></s:Envelope>"#;
+        assert!(parse_response(body, "Play").unwrap().is_empty());
     }
 
     #[test]
