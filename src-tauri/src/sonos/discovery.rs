@@ -76,10 +76,15 @@ pub async fn discover(timeout: Duration) -> Vec<String> {
             }
             let deadline = Instant::now() + timeout;
             let mut buf = [0u8; 2048];
-            // Skip I/O errors (Windows reports WSAECONNRESET / 10054 on a UDP
-            // socket after an ICMP unreachable) and stop only at the deadline.
+            // Windows reports WSAECONNRESET (10054) on a UDP socket after an
+            // ICMP unreachable; that is not fatal, so keep collecting. Any
+            // other error ends this interface's collection.
             while let Ok(res) = tokio::time::timeout_at(deadline, sock.recv_from(&mut buf)).await {
-                let Ok((n, _)) = res else { continue };
+                let n = match res {
+                    Ok((n, _)) => n,
+                    Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => continue,
+                    Err(_) => break,
+                };
                 if let Some(ip) = parse_ssdp_location(&String::from_utf8_lossy(&buf[..n])) {
                     let _ = tx.send(ip);
                 }

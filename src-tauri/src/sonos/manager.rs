@@ -130,6 +130,13 @@ pub fn detect_unexpected_stop(
     matches!(next.track_index, Some(i) if i + 1 < queue_len)
 }
 
+/// A `Playing` observation may clear `user_stopped` only if SONE did not mark
+/// a user stop since the observation's transport read began (otherwise the
+/// observation is stale).
+pub fn should_clear_user_stopped(epoch_at_read: u64, current_epoch: u64) -> bool {
+    epoch_at_read == current_epoch
+}
+
 /// Whether `next` should be emitted: first state, any change besides the
 /// position, or the re-anchor interval elapsed.
 pub fn state_needs_emit(
@@ -230,6 +237,8 @@ pub struct SonosSnapshot {
 struct State {
     groups: Vec<SonosGroup>,
     scanned: bool,
+    /// Consecutive refreshes that found nothing while groups were known.
+    empty_refreshes: u32,
     selected: Option<String>,
     manual_ip: Option<String>,
     last_coordinator: Option<String>,
@@ -255,6 +264,11 @@ struct Inner {
     /// Set by SONE's own pause / queue_clear / load_queue; cleared by the
     /// poller on the next observed Playing. Suppresses the unexpected-stop error.
     user_stopped: AtomicBool,
+    /// Incremented on every `user_stopped` set (see `should_clear_user_stopped`).
+    stop_epoch: AtomicU64,
+    /// Identifies the current poller; changed (under the `poller` lock) by
+    /// every `select`. A poller whose token no longer matches exits.
+    poller_token: AtomicU64,
     /// Set by `start`; the poller emits through it.
     app: Mutex<Option<AppHandle>>,
     /// The running poller for the selected group (at most one).
@@ -312,6 +326,8 @@ impl SonosManager {
                 own_update_id: Mutex::new(None),
                 position: Mutex::new(None),
                 user_stopped: AtomicBool::new(false),
+                stop_epoch: AtomicU64::new(0),
+                poller_token: AtomicU64::new(0),
                 app: Mutex::new(None),
                 poller: Mutex::new(None),
             }),
@@ -338,6 +354,11 @@ impl SonosManager {
 
     pub fn manual_ip(&self) -> Option<String> {
         lock(&self.inner.state).manual_ip.clone()
+    }
+
+    fn mark_user_stopped(&self) {
+        self.inner.stop_epoch.fetch_add(1, Ordering::SeqCst);
+        self.inner.user_stopped.store(true, Ordering::SeqCst);
     }
 
     fn bump_generation(&self) -> u64 {
@@ -376,19 +397,30 @@ impl SonosManager {
         }
     }
 
-    /// Reloads the topology: from the manual IP when set (falling back to
-    /// SSDP discovery if that fails), otherwise from SSDP.
+    /// Reloads the topology. Seeds, in order: the manual IP plus the IPs of
+    /// currently known members (cheap, immune to a lossy SSDP round); SSDP
+    /// discovery only if that fails. A non-empty topology is only replaced by
+    /// an empty one after two consecutive empty refreshes.
     pub async fn refresh_topology(&self) -> Result<Vec<SonosGroup>, SoneError> {
-        let manual = lock(&self.inner.state).manual_ip.clone();
+        let (manual, known) = {
+            let st = lock(&self.inner.state);
+            let mut known: Vec<String> = st.manual_ip.iter().cloned().collect();
+            for m in st.groups.iter().flat_map(|g| g.members.iter()) {
+                if !known.contains(&m.ip) {
+                    known.push(m.ip.clone());
+                }
+            }
+            (st.manual_ip.clone(), known)
+        };
         let mut result = Err(SoneError::Sonos("no Sonos speakers to query".into()));
-        if let Some(ip) = manual {
-            result = fetch_topology(&self.inner.soap, &[ip]).await;
+        if !known.is_empty() {
+            result = fetch_topology(&self.inner.soap, &known).await;
         }
         if result.is_err() {
             let seeds = discover(DISCOVERY_TIMEOUT).await;
             if !seeds.is_empty() {
                 result = fetch_topology(&self.inner.soap, &seeds).await;
-            } else if lock(&self.inner.state).manual_ip.is_none() {
+            } else if manual.is_none() {
                 // Nothing answered: an empty, completed scan.
                 result = Ok(Vec::new());
             }
@@ -396,6 +428,13 @@ impl SonosManager {
         let mut st = lock(&self.inner.state);
         st.scanned = true;
         let groups = result?;
+        if groups.is_empty() && !st.groups.is_empty() {
+            st.empty_refreshes += 1;
+            if st.empty_refreshes < 2 {
+                return Ok(st.groups.clone());
+            }
+        }
+        st.empty_refreshes = 0;
         st.groups = groups.clone();
         Ok(groups)
     }
@@ -434,9 +473,9 @@ impl SonosManager {
     /// Selects the casting group (or none). `forget_last` only matters for
     /// `None`: it also clears the remembered coordinator.
     pub fn select(&self, coordinator_id: Option<String>, forget_last: bool) {
-        // Stop the old poller first so it cannot record a stale position
-        // after the reset below.
-        self.stop_poller();
+        // One critical section under the poller lock: concurrent selects
+        // serialize, so the surviving poller always matches `selected`.
+        let mut poller = lock(&self.inner.poller);
         {
             let mut st = lock(&self.inner.state);
             match &coordinator_id {
@@ -444,32 +483,27 @@ impl SonosManager {
                 None if forget_last => st.last_coordinator = None,
                 None => {}
             }
-            st.selected = coordinator_id;
+            st.selected = coordinator_id.clone();
+        }
+        // New token first: the old poller (abort is asynchronous) sees it no
+        // longer owns the selection and exits before touching anything.
+        let token = self.inner.poller_token.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Some(old) = poller.take() {
+            old.abort();
         }
         self.bump_generation();
         self.set_own_update_id(None);
         *lock(&self.inner.position) = None;
-        self.on_selection_changed();
-    }
 
-    /// Starts the poller for the new selection (none for `select(None)`).
-    fn on_selection_changed(&self) {
-        let Some(id) = lock(&self.inner.state).selected.clone() else {
-            return;
-        };
-        let Some(app) = lock(&self.inner.app).clone() else {
+        let (Some(id), Some(app)) = (coordinator_id, lock(&self.inner.app).clone()) else {
             return;
         };
         let this = self.clone();
         let handle = tauri::async_runtime::spawn(async move {
-            this.poll_loop(app, id).await;
+            this.poll_loop(app, id, token).await;
         });
-        *lock(&self.inner.poller) = Some(handle);
-    }
-
-    fn stop_poller(&self) {
-        if let Some(h) = lock(&self.inner.poller).take() {
-            h.abort();
+        if let Some(stale) = poller.replace(handle) {
+            stale.abort();
         }
     }
 
@@ -592,7 +626,7 @@ impl SonosManager {
         let guard = Arc::clone(&self.inner.queue_lock).lock_owned().await;
         let plan = plan_load(track_ids, start_index);
         let soap = &self.inner.soap;
-        self.inner.user_stopped.store(true, Ordering::SeqCst);
+        self.mark_user_stopped();
 
         services::remove_all(soap, &ip).await?;
         // From here on a failure leaves the speaker's queue empty/partial.
@@ -749,7 +783,7 @@ impl SonosManager {
         // only the remaining append batches.
         let _guard = self.inner.queue_lock.lock().await;
         self.bump_generation();
-        self.inner.user_stopped.store(true, Ordering::SeqCst);
+        self.mark_user_stopped();
         services::remove_all(&self.inner.soap, &ip).await?;
         self.set_own_update_id(None);
         Ok(())
@@ -862,8 +896,14 @@ impl SonosManager {
         }
     }
 
-    /// Polls the selected group's coordinator once a second until aborted.
-    async fn poll_loop(self, app: AppHandle, coordinator_id: String) {
+    fn owns(&self, token: u64) -> bool {
+        self.inner.poller_token.load(Ordering::SeqCst) == token
+    }
+
+    /// Polls the selected group's coordinator once a second until aborted or
+    /// superseded. Aborting only takes effect at an await point, so every
+    /// side effect re-checks `owns(token)` after the awaits before it.
+    async fn poll_loop(self, app: AppHandle, coordinator_id: String, token: u64) {
         let mut interval = tokio::time::interval(POLL_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut tracker = ReachTracker::default();
@@ -873,15 +913,22 @@ impl SonosManager {
         let mut queue_len = 0usize;
         loop {
             interval.tick().await;
-            let Some((ip, members)) = self.poll_target(&coordinator_id) else {
-                continue;
-            };
             let now = Instant::now();
-            let mut state = match self
-                .read_state(&coordinator_id, &ip, &members, prev.as_ref())
-                .await
-            {
-                Ok(s) => s,
+            let epoch_at_read = self.inner.stop_epoch.load(Ordering::SeqCst);
+            // A group that left the topology counts as a failed poll, so
+            // reachability can still reach Lost.
+            let read = match self.poll_target(&coordinator_id) {
+                None => Err(SoneError::Sonos("group not in topology".into())),
+                Some((ip, members)) => self
+                    .read_state(&coordinator_id, &ip, &members, prev.as_ref())
+                    .await
+                    .map(|s| (s, ip)),
+            };
+            if !self.owns(token) {
+                return;
+            }
+            let (mut state, ip) = match read {
+                Ok(r) => r,
                 Err(e) => {
                     log::debug!("[sonos] poll failed: {e}");
                     let reach = tracker.record(false, now);
@@ -900,13 +947,20 @@ impl SonosManager {
             self.record_position(Some(state.position_secs as f32));
 
             // Queue change detection.
-            match services::browse(&self.inner.soap, &ip, "Q:0", 0, 1).await {
+            let probe = services::browse(&self.inner.soap, &ip, "Q:0", 0, 1).await;
+            if !self.owns(token) {
+                return;
+            }
+            match probe {
                 Ok(b) if queue_update_id != Some(b.update_id) => {
                     // A change that is neither our last emitted view nor our own
                     // write is a foreign edit: cancel any running back-fill. If
                     // the queue lock is held, an own mutation is in flight, so
                     // skip. The first observation after selecting has no
                     // baseline to compare against.
+                    if !self.owns(token) {
+                        return;
+                    }
                     if queue_update_id.is_some() {
                         if let Ok(_free) = self.inner.queue_lock.try_lock() {
                             if self.own_update_id() != Some(b.update_id) {
@@ -914,7 +968,11 @@ impl SonosManager {
                             }
                         }
                     }
-                    match self.read_queue(&ip).await {
+                    let queue = self.read_queue(&ip).await;
+                    if !self.owns(token) {
+                        return;
+                    }
+                    match queue {
                         Ok((update_id, items)) => {
                             queue_len = items.len();
                             queue_update_id = Some(update_id);
@@ -934,8 +992,16 @@ impl SonosManager {
                 Err(e) => log::debug!("[sonos] queue probe failed: {e}"),
             }
 
+            if !self.owns(token) {
+                return;
+            }
             if state.transport_state == TransportState::Playing {
-                self.inner.user_stopped.store(false, Ordering::SeqCst);
+                if should_clear_user_stopped(
+                    epoch_at_read,
+                    self.inner.stop_epoch.load(Ordering::SeqCst),
+                ) {
+                    self.inner.user_stopped.store(false, Ordering::SeqCst);
+                }
             } else if let Some(p) = &prev {
                 let user_stopped = self.inner.user_stopped.load(Ordering::SeqCst);
                 if detect_unexpected_stop(p, &state, queue_len, user_stopped) {
@@ -963,7 +1029,7 @@ impl SonosManager {
 
     pub async fn pause(&self) -> Result<(), SoneError> {
         let (_, ip) = self.selected_coordinator()?;
-        self.inner.user_stopped.store(true, Ordering::SeqCst);
+        self.mark_user_stopped();
         services::pause(&self.inner.soap, &ip).await
     }
 
@@ -1138,6 +1204,12 @@ mod tests {
         let prev = st(TransportState::Playing, None);
         let next = st(TransportState::Stopped, None);
         assert!(!detect_unexpected_stop(&prev, &next, 10, false));
+    }
+
+    #[test]
+    fn stale_playing_does_not_clear_user_stopped() {
+        assert!(should_clear_user_stopped(4, 4));
+        assert!(!should_clear_user_stopped(4, 5));
     }
 
     #[test]
