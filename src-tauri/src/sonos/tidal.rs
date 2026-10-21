@@ -11,8 +11,6 @@ use crate::sonos::soap::{parse_hms, SONOS_PORT};
 pub const TIDAL_SID: u32 = 174;
 pub const TIDAL_TRACK_FLAGS: u32 = 24616;
 pub const TIDAL_TRACK_EXT: &str = "flac";
-pub const TIDAL_ITEM_ID_PREFIX: &str = "10032020";
-pub const TIDAL_DESC_TOKEN: &str = "SA_RINCON44551_X_#Svc44551-0-Token";
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -41,26 +39,25 @@ pub fn build_track_uri(track_id: u64, sn: u32) -> String {
     )
 }
 
-/// Minimal DIDL-Lite for a TIDAL track. The firmware ignores client-supplied
-/// metadata and fetches it from the service, so the title is left empty.
+/// Minimal DIDL-Lite for a TIDAL track (the id is carried by the URI only).
+///
+/// Do not add a service `<desc>` token or a TIDAL item id: Sonos then
+/// validates every track with TIDAL, and one failure rejects the whole
+/// 16-track `AddMultipleURIsToQueue` batch with UPnP 800. Empty metadata is
+/// rejected too (402), so a DIDL is required. Firmware 94.1 drops client
+/// metadata anyway and fetches it from the service.
 /// Raw XML: the SOAP layer escapes it when used as an argument.
-pub fn build_track_didl(track_id: u64) -> String {
-    format!(
-        concat!(
-            r#"<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" "#,
-            r#"xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" "#,
-            r#"xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" "#,
-            r#"xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">"#,
-            r#"<item id="{prefix}track%2f{id}" parentID="-1" restricted="true">"#,
-            r#"<dc:title></dc:title>"#,
-            r#"<upnp:class>object.item.audioItem.musicTrack</upnp:class>"#,
-            r#"<desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">{token}</desc>"#,
-            r#"</item></DIDL-Lite>"#
-        ),
-        prefix = TIDAL_ITEM_ID_PREFIX,
-        id = track_id,
-        token = TIDAL_DESC_TOKEN,
+pub fn build_track_didl(_track_id: u64) -> String {
+    concat!(
+        r#"<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" "#,
+        r#"xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" "#,
+        r#"xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" "#,
+        r#"xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">"#,
+        r#"<item id="-1" parentID="-1" restricted="true">"#,
+        r#"<upnp:class>object.item.audioItem.musicTrack</upnp:class>"#,
+        r#"</item></DIDL-Lite>"#
     )
+    .to_string()
 }
 
 /// Value of query parameter `key` in `uri`.
@@ -347,7 +344,8 @@ mod tests {
                 break;
             }
         }
-        assert!(didl.contains(TIDAL_DESC_TOKEN));
-        assert!(didl.contains("10032020track%2f1"));
+        assert!(didl.contains("object.item.audioItem.musicTrack"));
+        assert!(!didl.contains("SA_RINCON"));
+        assert!(!didl.contains("<desc"));
     }
 }

@@ -403,6 +403,9 @@ impl SonosManager {
     /// `start_index` / `position_secs`, and back-fills the rest in the
     /// background (earlier tracks first, then the tail).
     ///
+    /// If a step fails after `remove_all`, the speaker's queue is left
+    /// empty or partial (no rollback; the failure is logged).
+    ///
     /// The queue lock is held from `remove_all` through `play` and then handed
     /// to the back-fill task, so nothing can run between the foreground part
     /// and the start of the prepend phase.
@@ -426,24 +429,34 @@ impl SonosManager {
         let soap = &self.inner.soap;
 
         services::remove_all(soap, &ip).await?;
-        self.set_own_update_id(None);
-        self.add_tracks(&ip, sn, &plan.initial, 0).await?;
-        services::set_queue_as_source(soap, &ip, &coordinator_id).await?;
-        services::seek_track(soap, &ip, queue_position(plan.initial_start)).await?;
-        if position_secs > 0.0 {
-            services::seek_time(soap, &ip, position_secs).await?;
-        }
-        // SONE never uses Sonos shuffle: keep the repeat part, drop the rest.
-        let repeat = match services::get_play_mode(soap, &ip).await {
-            Ok(m) => services::play_mode_to_repeat(&m),
-            Err(e) => {
-                log::debug!("[sonos] get_play_mode failed, assuming NORMAL: {e}");
-                0
+        // From here on a failure leaves the speaker's queue empty/partial.
+        let foreground = async {
+            self.set_own_update_id(None);
+            self.add_tracks(&ip, sn, &plan.initial, 0).await?;
+            services::set_queue_as_source(soap, &ip, &coordinator_id).await?;
+            services::seek_track(soap, &ip, queue_position(plan.initial_start)).await?;
+            if position_secs > 0.0 {
+                services::seek_time(soap, &ip, position_secs).await?;
             }
+            // SONE never uses Sonos shuffle: keep the repeat part, drop the rest.
+            let repeat = match services::get_play_mode(soap, &ip).await {
+                Ok(m) => services::play_mode_to_repeat(&m),
+                Err(e) => {
+                    log::debug!("[sonos] get_play_mode failed, assuming NORMAL: {e}");
+                    0
+                }
+            };
+            services::set_play_mode(soap, &ip, services::repeat_to_play_mode(repeat)).await?;
+            if play {
+                services::play(soap, &ip).await?;
+            }
+            Ok::<(), SoneError>(())
         };
-        services::set_play_mode(soap, &ip, services::repeat_to_play_mode(repeat)).await?;
-        if play {
-            services::play(soap, &ip).await?;
+        if let Err(e) = foreground.await {
+            log::warn!(
+                "[sonos] load_queue failed after clearing the queue; queue left empty/partial: {e}"
+            );
+            return Err(e);
         }
 
         if !plan.append.is_empty() || !plan.prepend.is_empty() {
