@@ -233,3 +233,11 @@ Run against the user's system: "Sonos PC" (Beam, ZPS14) and "Sonos Music" (two O
 - **TV input:** the Beam's TV input reports `TrackURI` `x-sonos-htastream:<RINCON>:spdif`, with `TrackDuration`/`RelTime`/`TrackMetaData` `NOT_IMPLEMENTED`.
 - **UPnP fault:** a `Seek` with a bad unit returns HTTP 500, `errorCode` 710.
 - **Fixtures:** `src-tauri/src/sonos/fixtures/` (sanitized: IPs → 192.0.2.x, RINCON ids → `RINCON_000000000001..3 01400`, `sn` → 3, the Beam room renamed `Kök & Bad` to exercise escaping).
+
+### 10.1 Follow-up findings from the Task 5 live smoke test (2026-10-22)
+
+- **DIDL service token:** the DIDL that `build_track_didl` originally sent carried the TIDAL service token (`desc SA_RINCON44551…`) and item id `10032020track%2f<id>`. That makes Sonos validate every track with TIDAL. Some tracks fail with **UPnP 800**, and a single failure rejects the whole `AddMultipleURIsToQueue` batch.
+  - SONE therefore sends a **minimal DIDL**: item id `-1`, parentID `-1`, class `object.item.audioItem.musicTrack`, no `desc`.
+  - Empty metadata is not an alternative: it is rejected with 402.
+- **`flags`:** use `flags=24616` for every track. `24624`, which the TIDAL app sometimes writes, makes Sonos skip a track that otherwise plays.
+- **Unavailable tracks:** a track TIDAL no longer serves is skipped by Sonos at play time. SONE also drops tracks it already knows are unavailable before casting.
