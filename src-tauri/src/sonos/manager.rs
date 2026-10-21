@@ -540,11 +540,11 @@ impl SonosManager {
     pub async fn queue_replace_after(&self, index: usize, ids: &[u64]) -> Result<(), SoneError> {
         let (_, ip) = self.selected_coordinator()?;
         let sn = self.ensure_sn(&ip).await?;
-        // A running back-fill would re-add the tail we are replacing; the
-        // bump cancels its remaining append batches (a pending prepend phase
-        // holds the lock, so we wait for it and indices stay valid).
-        self.bump_generation();
+        // Take the lock first: a running prepend phase holds it and finishes
+        // (so indices are valid). Only then bump the generation, which cancels
+        // just the remaining append batches that would re-add the old tail.
         let _guard = self.inner.queue_lock.lock().await;
+        self.bump_generation();
         let browsed = services::browse(&self.inner.soap, &ip, "Q:0", 0, 1).await?;
         let keep = index.saturating_add(1);
         let total = browsed.total_matches as usize;
@@ -566,8 +566,10 @@ impl SonosManager {
 
     pub async fn queue_clear(&self) -> Result<(), SoneError> {
         let (_, ip) = self.selected_coordinator()?;
-        self.bump_generation();
+        // Lock first so a running prepend completes; the bump then cancels
+        // only the remaining append batches.
         let _guard = self.inner.queue_lock.lock().await;
+        self.bump_generation();
         services::remove_all(&self.inner.soap, &ip).await?;
         self.set_own_update_id(None);
         Ok(())
