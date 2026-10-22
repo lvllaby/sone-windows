@@ -67,8 +67,12 @@ export function playNextInsertIndex(
 /**
  * Re-keys the pre-shuffle order onto the mirrored upcoming queue so that
  * turning shuffle off (which matches by `_qid`) works while casting: each
- * entry becomes the matching occurrence (by id) from `queue`, entries no
- * longer upcoming are dropped, and upcoming tracks it lacks go at the end.
+ * entry becomes the matching occurrence (by id, in order; each mirrored
+ * occurrence matches at most one entry) from `queue`, and upcoming tracks it
+ * lacks go at the end. Entries with no match are kept unchanged in place:
+ * during back-fill a track missing from the mirror usually hasn't arrived
+ * yet. Removed or already played tracks linger here too; toggleShuffle only
+ * restores entries whose `_qid` is still in the queue, so they drop out then.
  */
 export function rekeyOriginalQueue(original: Track[], queue: Track[]): Track[] {
   const byId = new Map<number, Track[]>();
@@ -79,8 +83,7 @@ export function rekeyOriginalQueue(original: Track[], queue: Track[]): Track[] {
   }
   const out: Track[] = [];
   for (const t of original) {
-    const match = byId.get(t.id)?.shift();
-    if (match) out.push(match);
+    out.push(byId.get(t.id)?.shift() ?? t);
   }
   const used = new Set(out);
   return [...out, ...queue.filter((t) => !used.has(t))];
