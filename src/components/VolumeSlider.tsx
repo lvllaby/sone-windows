@@ -37,7 +37,7 @@ const VolumeSlider = memo(function VolumeSlider({
   const displayVolume = bitPerfect
     ? 1
     : casting
-      ? groupMuted
+      ? groupMuted && !held.holding
         ? 0
         : held.value
       : volume;

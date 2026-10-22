@@ -1,24 +1,14 @@
-import { memo, useCallback, useRef } from "react";
+import { memo } from "react";
 import { useAtom, useAtomValue } from "jotai";
 import { Speaker } from "lucide-react";
 import { playbackTargetAtom } from "../atoms/playback";
-import { sonosGroupsAtom, sonosPickerOpenAtom } from "../atoms/sonos";
-import SonosPicker from "./SonosPicker";
+import { sonosGroupsAtom, sonosPickerAtom } from "../atoms/sonos";
 
 /** Opens the "Play on" picker; hidden while no Sonos group is known. */
 const SonosButton = memo(function SonosButton() {
   const groups = useAtomValue(sonosGroupsAtom);
   const target = useAtomValue(playbackTargetAtom);
-  const [open, setOpen] = useAtom(sonosPickerOpenAtom);
-  const buttonRef = useRef<HTMLButtonElement>(null);
-
-  const close = useCallback(
-    (returnFocus: boolean) => {
-      setOpen(false);
-      if (returnFocus) buttonRef.current?.focus();
-    },
-    [setOpen],
-  );
+  const [picker, setPicker] = useAtom(sonosPickerAtom);
 
   if (groups.length === 0) return null;
 
@@ -27,9 +17,8 @@ const SonosButton = memo(function SonosButton() {
   return (
     <>
       <button
-        ref={buttonRef}
         data-sonos-trigger
-        onClick={() => setOpen(!open)}
+        onClick={(e) => setPicker(picker ? null : { opener: e.currentTarget })}
         className={`${
           casting
             ? "text-th-accent"
@@ -38,11 +27,10 @@ const SonosButton = memo(function SonosButton() {
         title="Sonos speakers"
         aria-label="Sonos speakers"
         aria-haspopup="dialog"
-        aria-expanded={open}
+        aria-expanded={!!picker}
       >
         <Speaker size={16} strokeWidth={2} />
       </button>
-      {open && <SonosPicker anchorRef={buttonRef} onClose={close} />}
     </>
   );
 });

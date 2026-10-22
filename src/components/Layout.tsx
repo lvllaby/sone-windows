@@ -13,6 +13,7 @@ import {
   maximizedPlayerAtom,
 } from "../atoms/ui";
 import MaximizedPlayer from "./MaximizedPlayer";
+import SonosPicker from "./SonosPicker";
 import { useMiniplayerEmitter } from "../hooks/useMiniplayerEmitter";
 
 interface LayoutProps {
@@ -107,6 +108,7 @@ export default function Layout({ children }: LayoutProps) {
       <NowPlayingDrawer />
       {maximized && <MaximizedPlayer />}
       <PlayerBar />
+      <SonosPicker />
       {!nativeChrome && <ResizeEdges top={4} bottom={4} left={4} right={4} />}
     </div>
   );

@@ -15,8 +15,8 @@ export const sonosHandoffAtom = atom<{ to: string } | null>(null);
 /** Tracks inserted via "play next" since the current track started (Sonos has no manual queue). */
 export const sonosPendingPlayNextAtom = atom(0);
 
-/** Whether the "Play on" picker is open (the button and the indicator toggle it). */
-export const sonosPickerOpenAtom = atom(false);
+/** The "Play on" picker: null when closed, else the element that opened it (the anchor). */
+export const sonosPickerAtom = atom<{ opener: HTMLElement } | null>(null);
 
 /** "Playing on <group>" while casting ("Reconnecting to <group>…" when the group stopped answering), else null. */
 export const sonosPlayingOnAtom = atom((get) => {

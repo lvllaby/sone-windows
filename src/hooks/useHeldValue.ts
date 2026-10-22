@@ -43,5 +43,5 @@ export function useHeldValue(external: number) {
     window.addEventListener("pointercancel", onUp);
   }, [release]);
 
-  return { value: held ?? external, change, grab };
+  return { value: held ?? external, holding: held !== null, change, grab };
 }

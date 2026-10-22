@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { ReactNode, RefObject } from "react";
-import { useAtomValue } from "jotai";
+import type { ReactNode } from "react";
+import { useAtom, useAtomValue } from "jotai";
 import { Check, Loader2, Monitor, Speaker, Volume2 } from "lucide-react";
 import MenuPortal from "./MenuPortal";
 import { playbackTargetAtom } from "../atoms/playback";
@@ -8,6 +8,7 @@ import {
   sonosGroupVolumeAtom,
   sonosGroupsAtom,
   sonosHandoffAtom,
+  sonosPickerAtom,
   sonosStateAtom,
 } from "../atoms/sonos";
 import {
@@ -21,11 +22,6 @@ import { useSonosHandoff } from "../hooks/useSonosHandoff";
 
 const MEMBER_VOLUME_THROTTLE_MS = 100;
 const PICKER_WIDTH = 288;
-
-interface SonosPickerProps {
-  anchorRef: RefObject<HTMLElement | null>;
-  onClose: (returnFocus: boolean) => void;
-}
 
 /** A thin slider; `value` is 0-1. */
 function PickerSlider({
@@ -125,9 +121,17 @@ function useMemberVolumeSender() {
   const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const pending = useRef(new Map<string, number>());
 
+  // Closing mid-drag still sends the last value
   useEffect(() => {
     const t = timers.current;
-    return () => t.forEach((id) => clearTimeout(id));
+    const p = pending.current;
+    return () => {
+      t.forEach((id) => clearTimeout(id));
+      p.forEach((value, memberId) =>
+        sonosSetMemberVolume(memberId, value).catch(() => {}),
+      );
+      p.clear();
+    };
   }, []);
 
   return (memberId: string, volume: number) => {
@@ -150,14 +154,15 @@ function useMemberVolumeSender() {
   };
 }
 
-/** `<rooms> · <artist> – <title>` (just the title when there's no artist, e.g. TV). */
+/** `<rooms> · <artist> – <title>` for multi-room groups, else `<artist> – <title>` (just the title on TV). */
 function nowPlayingSubtitle(
   group: SonosGroup,
   item: { title: string; artist: string },
 ): string {
-  const rooms = group.members.map((m) => m.roomName).join(", ");
   const what = item.artist ? `${item.artist} – ${item.title}` : item.title;
-  return `${rooms} · ${what}`;
+  // A single room would only repeat the row title
+  if (group.members.length <= 1) return what;
+  return `${group.members.map((m) => m.roomName).join(", ")} · ${what}`;
 }
 
 function Row({
@@ -221,7 +226,26 @@ function Row({
   );
 }
 
-export default function SonosPicker({ anchorRef, onClose }: SonosPickerProps) {
+/** Mounted once in Layout; renders only while open. */
+export default function SonosPicker() {
+  const [picker, setPicker] = useAtom(sonosPickerAtom);
+  if (!picker) return null;
+  const { opener } = picker;
+  // Escape puts focus back on the opener, if it's still there
+  const close = (returnFocus: boolean) => {
+    setPicker(null);
+    if (returnFocus && opener.isConnected) opener.focus();
+  };
+  return <PickerPanel opener={opener} onClose={close} />;
+}
+
+function PickerPanel({
+  opener,
+  onClose,
+}: {
+  opener: HTMLElement;
+  onClose: (returnFocus: boolean) => void;
+}) {
   const groups = useAtomValue(sonosGroupsAtom);
   const target = useAtomValue(playbackTargetAtom);
   const state = useAtomValue(sonosStateAtom);
@@ -232,16 +256,20 @@ export default function SonosPicker({ anchorRef, onClose }: SonosPickerProps) {
   const [pos, setPos] = useState<{ bottom: number; left: number } | null>(null);
   const [subtitles, setSubtitles] = useState<Record<string, string>>({});
 
-  // Anchored above the button, right edges aligned, kept inside the window
+  // Anchored above the opener, right edges aligned, kept inside the window;
+  // bottom-right when the opener is gone or hidden
   useLayoutEffect(() => {
-    const rect = anchorRef.current?.getBoundingClientRect();
-    if (!rect) return;
+    const rect = opener.isConnected ? opener.getBoundingClientRect() : null;
+    if (!rect || (rect.width === 0 && rect.height === 0)) {
+      setPos({ bottom: 100, left: window.innerWidth - PICKER_WIDTH - 16 });
+      return;
+    }
     const left = Math.max(
       8,
       Math.min(rect.right - PICKER_WIDTH, window.innerWidth - PICKER_WIDTH - 8),
     );
     setPos({ bottom: window.innerHeight - rect.top + 8, left });
-  }, [anchorRef]);
+  }, [opener]);
 
   // Now-playing subtitles: fetched once per open, in parallel, never polled
   useEffect(() => {
@@ -267,18 +295,22 @@ export default function SonosPicker({ anchorRef, onClose }: SonosPickerProps) {
     const onMouseDown = (e: MouseEvent) => {
       const el = e.target as HTMLElement;
       if (panelRef.current?.contains(el)) return;
-      // The button and the indicator toggle the picker themselves
+      // The openers toggle the picker themselves
       if (el.closest("[data-sonos-trigger]")) return;
       onClose(false);
     };
+    // Capture phase: Escape closes only the picker, not a player or modal below
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose(true);
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      onClose(true);
     };
     document.addEventListener("mousedown", onMouseDown);
-    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keydown", onKeyDown, true);
     return () => {
       document.removeEventListener("mousedown", onMouseDown);
-      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keydown", onKeyDown, true);
     };
   }, [onClose]);
 
@@ -304,7 +336,7 @@ export default function SonosPicker({ anchorRef, onClose }: SonosPickerProps) {
           left: pos?.left ?? 0,
           visibility: pos ? "visible" : "hidden",
         }}
-        className="z-[100] bg-th-surface rounded-lg shadow-2xl shadow-black/60 border border-th-border-subtle py-1 animate-fadeIn select-none"
+        className="z-[10000] bg-th-surface rounded-lg shadow-2xl shadow-black/60 border border-th-border-subtle py-1 animate-fadeIn select-none"
       >
         <div className="px-3 pt-2 pb-1 text-[11px] uppercase tracking-wider text-th-text-muted">
           Play on
