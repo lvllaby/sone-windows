@@ -293,17 +293,9 @@ export function useSonosHandoff(): {
   return { switchTarget, handoffInProgress };
 }
 
-declare global {
-  interface Window {
-    /** Dev-only: switch the playback target ("local" or a coordinator id). */
-    __sonosDebugSwitch?: (to: string) => Promise<void>;
-  }
-}
-
 export function useSonosAutoAttach() {
   const store = useStore();
   const { showToast } = useToast();
-  const switchTarget = useSwitchTarget();
 
   // Reattach to the remembered group in mirror mode: no transport command.
   // Retried on each topology update until attached, or until local
@@ -444,12 +436,4 @@ export function useSonosAutoAttach() {
       ),
     [store],
   );
-
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    window.__sonosDebugSwitch = switchTarget;
-    return () => {
-      delete window.__sonosDebugSwitch;
-    };
-  }, [switchTarget]);
 }

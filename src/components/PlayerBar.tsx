@@ -38,6 +38,8 @@ import { useMiniplayerWindow } from "../hooks/useMiniplayerWindow";
 import { TrackArtists } from "./TrackArtists";
 import QualityBadge from "./QualityBadge";
 import VolumeSlider from "./VolumeSlider";
+import SonosButton from "./SonosButton";
+import PlayingOnIndicator from "./PlayingOnIndicator";
 import TrackContextMenu from "./TrackContextMenu";
 
 // ─── TrackInfoSection ──────────────────────────────────────────────────────
@@ -387,6 +389,7 @@ const TransportControls = memo(function TransportControls() {
 
       {/* Progress bar */}
       <ProgressScrubber />
+      <PlayingOnIndicator />
     </div>
   );
 });
@@ -410,6 +413,7 @@ const DrawerButtons = memo(function DrawerButtons() {
       >
         <Mic2 size={16} strokeWidth={2} />
       </button>
+      <SonosButton />
       <VolumeSlider />
       <button
         onClick={() => toggleDrawerTab("queue")}

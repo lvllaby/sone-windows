@@ -380,6 +380,14 @@ export function usePlaybackActions() {
     [store, sonos],
   );
 
+  /** Mutes/unmutes the Sonos group; local mute is a volume change (setVolume). */
+  const setMuted = useCallback(
+    async (muted: boolean) => {
+      if (sonos.isCasting()) return sonos.setMuted(muted);
+    },
+    [sonos],
+  );
+
   const seekTo = useCallback(async (positionSecs: number) => {
     if (sonos.isCasting()) return sonos.seek(positionSecs);
     seekAfterStartGen++;
@@ -1275,6 +1283,7 @@ export function usePlaybackActions() {
     pauseTrack,
     resumeTrack,
     setVolume,
+    setMuted,
     seekTo,
     addToQueue,
     playNextInQueue,

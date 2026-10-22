@@ -1,10 +1,24 @@
 import { memo } from "react";
 import { useAtomValue } from "jotai";
-import { currentTrackAtom, streamInfoAtom } from "../atoms/playback";
+import {
+  currentTrackAtom,
+  playbackTargetAtom,
+  streamInfoAtom,
+} from "../atoms/playback";
 
 const QualityBadge = memo(function QualityBadge() {
   const currentTrack = useAtomValue(currentTrackAtom);
   const streamInfo = useAtomValue(streamInfoAtom);
+  const casting = useAtomValue(playbackTargetAtom).type === "sonos";
+
+  // The group decodes and plays the stream; SONE has no format details for it
+  if (casting) {
+    return (
+      <span className="px-2 py-0.5 text-[9px] font-black rounded tracking-wider leading-none bg-th-button-hover text-th-text-primary">
+        Sonos
+      </span>
+    );
+  }
 
   const quality = streamInfo?.audioQuality || currentTrack?.audioQuality;
   if (!quality) return null;

@@ -149,13 +149,6 @@ function withMirrorQids(tracks: Track[]): Track[] {
   });
 }
 
-declare global {
-  interface Window {
-    /** Dev-only: point the playback target at a Sonos group. */
-    __sonosDebugSetTarget?: (coordinatorId: string, name: string) => void;
-  }
-}
-
 export function useSonosSync() {
   const store = useStore();
   const { showToast } = useToast();
@@ -485,18 +478,12 @@ export function useSonosSync() {
       void resolveAndMirror(store.get(sonosQueueAtom));
     });
 
-    if (import.meta.env.DEV) {
-      window.__sonosDebugSetTarget = (coordinatorId, name) =>
-        store.set(playbackTargetAtom, { type: "sonos", coordinatorId, name });
-    }
-
     return () => {
       disposed = true;
       unsubHandoff();
       unsubTarget();
       unsubRepeat();
       unlistens.forEach((p) => p.then((fn) => fn()).catch(() => {}));
-      if (import.meta.env.DEV) delete window.__sonosDebugSetTarget;
     };
   }, [store, showToast, sonos]);
 }

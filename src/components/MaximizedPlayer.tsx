@@ -36,6 +36,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { formatTime } from "../lib/format";
 import { getInterpolatedPosition } from "../lib/playbackPosition";
 import QualityBadge from "./QualityBadge";
+import PlayingOnIndicator from "./PlayingOnIndicator";
 import { getTrackArtistDisplay } from "../utils/itemHelpers";
 import VolumeSlider from "./VolumeSlider";
 import {
@@ -252,6 +253,7 @@ const MaxTransportBar = memo(function MaxTransportBar({
             </button>
           </div>
           <MaxProgressScrubber isDraggingRef={isDraggingRef} resetHideTimer={resetHideTimer} />
+          <PlayingOnIndicator />
         </div>
 
         {/* Right: Quality + Lyrics toggle + Volume + Minimize */}

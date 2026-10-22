@@ -11,6 +11,7 @@ import {
   bitPerfectAtom,
 } from "../atoms/playback";
 import { favoriteTrackIdsAtom } from "../atoms/favorites";
+import { sonosPlayingOnAtom } from "../atoms/sonos";
 import { miniplayerOpenAtom } from "../atoms/ui";
 import { getInterpolatedPosition } from "../lib/playbackPosition";
 import { usePlaybackActions } from "./usePlaybackActions";
@@ -41,6 +42,8 @@ export interface MiniplayerState {
   volume: number;
   playbackSourceLabel: { type: string; id: string | number; name: string } | null;
   bitPerfect: boolean;
+  /** "Playing on <group>" while casting to Sonos. */
+  playingOn: string | null;
   accentColor: string;
   error?: string;
 }
@@ -99,6 +102,7 @@ export function useMiniplayerEmitter() {
         ? { type: source.type, id: source.id, name: source.name }
         : null,
       bitPerfect: store.get(bitPerfectAtom),
+      playingOn: store.get(sonosPlayingOnAtom),
       accentColor,
       error: lastErrorRef.current,
     };
@@ -130,6 +134,7 @@ export function useMiniplayerEmitter() {
       playbackSourceAtom,
       contextSourceAtom,
       bitPerfectAtom,
+      sonosPlayingOnAtom,
     ];
 
     const unsubs = atoms.map((a) => store.sub(a, scheduleEmit));

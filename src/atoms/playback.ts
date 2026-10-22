@@ -34,7 +34,7 @@ export const exclusiveDeviceAtom = atom<string | null>(null);
 export const consecutiveFailCountAtom = atom(0);
 
 /** Where audio is played: this device, or a Sonos group (by coordinator id). */
-export type PlaybackTarget =
+type PlaybackTarget =
   | { type: "local" }
   | { type: "sonos"; coordinatorId: string; name: string };
 

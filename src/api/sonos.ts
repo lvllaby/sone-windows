@@ -60,7 +60,7 @@ export interface SonosQueue {
   items: QueueItem[];
 }
 
-export interface SonosSnapshot {
+interface SonosSnapshot {
   groups: SonosGroup[];
   selected: string | null;
   /** Coordinator of the group containing the remembered last coordinator. */
@@ -155,10 +155,6 @@ export async function sonosQueueReplaceAfter(
   trackIds: number[],
 ): Promise<void> {
   return invoke("sonos_queue_replace_after", { index, trackIds });
-}
-
-export async function sonosQueueClear(): Promise<void> {
-  return invoke("sonos_queue_clear");
 }
 
 /** `volume` is 0-100. */

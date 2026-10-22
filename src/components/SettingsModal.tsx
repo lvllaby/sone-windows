@@ -11,6 +11,7 @@ import {
   Globe,
   RefreshCw,
   ShieldAlert,
+  Speaker,
 } from "lucide-react";
 import {
   autoplayAtom,
@@ -25,6 +26,99 @@ import {
   playbackSourceAtom,
   contextSourceAtom,
 } from "../atoms/playback";
+
+function SonosSettings() {
+  const [groups, setGroups] = useAtom(sonosGroupsAtom);
+  const { showToast } = useToast();
+  const [manualIp, setManualIp] = useState("");
+  // The value last sent to the backend, so blur + Enter don't apply it twice
+  const savedIp = useRef("");
+  const [rescanning, setRescanning] = useState(false);
+
+  useEffect(() => {
+    sonosGetSnapshot()
+      .then((snap) => {
+        savedIp.current = snap.manualIp ?? "";
+        setManualIp(savedIp.current);
+      })
+      .catch(() => {});
+  }, []);
+
+  const speakers = groups.reduce((n, g) => n + g.members.length, 0);
+  const status =
+    speakers === 0
+      ? "None found"
+      : speakers === 1
+        ? "1 speaker found"
+        : `${speakers} speakers found`;
+
+  const rescan = async () => {
+    setRescanning(true);
+    try {
+      setGroups(await sonosRescan());
+    } catch (e) {
+      showToast(safeErrorMessage(e, "Couldn't scan for speakers"));
+    } finally {
+      setRescanning(false);
+    }
+  };
+
+  const applyManualIp = async () => {
+    const ip = manualIp.trim();
+    if (ip === savedIp.current) return;
+    try {
+      setGroups(await sonosSetManualIp(ip || null));
+      savedIp.current = ip;
+    } catch (e) {
+      showToast(safeErrorMessage(e, "Couldn't use that address"));
+    }
+  };
+
+  return (
+    <div>
+      <h3 className="text-[11px] uppercase tracking-wider text-th-text-muted mb-3">
+        Sonos
+      </h3>
+
+      <div className="flex items-center justify-between py-3">
+        <div className="flex items-center gap-3 min-w-0">
+          <Speaker size={16} className="text-th-text-muted shrink-0" />
+          <div>
+            <p className="text-[13px] text-th-text-secondary">Speakers</p>
+            <p className="text-[11px] text-th-text-muted">{status}</p>
+          </div>
+        </div>
+        <button
+          onClick={rescan}
+          disabled={rescanning}
+          className="px-3 py-1 text-[12px] border border-th-border-subtle rounded-md text-th-text-secondary hover:text-th-text-primary hover:border-th-accent/50 transition-colors shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {rescanning ? "Scanning..." : "Rescan"}
+        </button>
+      </div>
+      <div className="pl-7 pb-2 space-y-1.5">
+        <label
+          htmlFor="sonos-manual-ip"
+          className="block text-[11px] text-th-text-muted"
+        >
+          Speaker IP address (if not found automatically)
+        </label>
+        <input
+          id="sonos-manual-ip"
+          type="text"
+          value={manualIp}
+          onChange={(e) => setManualIp(e.target.value)}
+          onBlur={applyManualIp}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") e.currentTarget.blur();
+          }}
+          placeholder="192.168.1.50"
+          className="w-full px-2.5 py-1.5 rounded-md bg-th-inset border border-th-border-subtle text-[12px] text-th-text-primary placeholder:text-th-text-disabled focus:border-th-accent/50 focus:outline-none"
+        />
+      </div>
+    </div>
+  );
+}
 
 function ExplicitContentToggle() {
   const [allowExplicit, setAllowExplicit] = useAtom(allowExplicitAtom);
@@ -63,6 +157,9 @@ function ExplicitContentToggle() {
   );
 }
 import { proxySettingsAtom, type ProxySettings } from "../atoms/proxy";
+import { sonosGroupsAtom } from "../atoms/sonos";
+import { sonosGetSnapshot, sonosRescan, sonosSetManualIp } from "../api/sonos";
+import { safeErrorMessage } from "../lib/errorUtils";
 import { decorationsAtom, hideTitleBarAtom } from "../atoms/ui";
 import { useToast } from "../contexts/ToastContext";
 import { clearAllCache } from "../api/tidal";
@@ -536,6 +633,9 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
                 </p>
               )}
             </div>
+
+            {/* ── Sonos ── */}
+            <SonosSettings />
 
             {/* ── Utilities ── */}
             <div>
