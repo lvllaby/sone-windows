@@ -241,3 +241,31 @@ Run against the user's system: "Sonos PC" (Beam, ZPS14) and "Sonos Music" (two O
   - Empty metadata is not an alternative: it is rejected with 402.
 - **`flags`:** use `flags=24616` for every track. `24624`, which the TIDAL app sometimes writes, makes Sonos skip a track that otherwise plays.
 - **Unavailable tracks:** a track TIDAL no longer serves is skipped by Sonos at play time. SONE also drops tracks it already knows are unavailable before casting.
+
+## 11. Implementation notes, deviations and known limitations (2026-10-23)
+
+These are recorded from the build and its reviews. Where they differ from §§3–7, this section wins.
+
+### Deviations
+
+- **Back-fill order (§6, local → G step 4).** History is inserted **first**, then the rest of the upcoming queue is appended.
+  - A queue-operations lock is held by every SONE queue mutation. The back-fill holds it for the whole history insert (≤50 tracks) and per batch while appending.
+  - Frontend indices therefore never see a half-inserted history.
+  - `replace_after` and `clear` cancel only the remaining append batches.
+- **Appends while the back-fill runs.** These come from playlists and Favorites that stream later pages in. They go through `sonos_queue_append`, which queues them behind the back-fill, so play order is preserved.
+  - While the back-fill is running (the `backfilling` flag on `sonos-queue`), reorder and shuffle are refused with: `Queue is still loading on Sonos — try again in a moment`.
+- **Mixed queues.** A queue that contains items from other sources can't be reordered or shuffled from SONE: `This queue has items from other sources and can't be reordered from SONE`.
+- **Non-queue sources** (radio, other apps, AirPlay, line-in, TV). `GetMediaInfo` decides whether the group is playing its queue. If it isn't:
+  - `trackIndex` is `null`, and the current item is shown from the track metadata.
+  - Queue edits are disabled; transport and volume still work.
+  - A stop isn't treated as an unavailable track.
+- **No-state watchdog.** After SONE selects a group, if no state arrives from it within 30 s, SONE falls back as for "Lost" (§7).
+- **"Applies to This computer only"** is shown in the user menu, where the exclusive-mode, bit-perfect and output-device controls actually live. It is not in Settings.
+- **Volume while casting.** Keyboard shortcuts, the miniplayer and media integrations act on the group volume and the Sonos mute.
+
+### Known limitations
+
+- **1000-track cap.** Queues longer than 1000 tracks are cut at 1000. Sonos keeps played items, so the "top up as playback nears the end" path from §4 can't add more once the queue is full, and autoplay can't append at the cap either. Trimming played history to make room is a possible follow-up.
+- **Reconnect timing.** A failed poll waits out the 3 s SOAP timeout, so "Reconnecting to …" appears after about 9–12 s rather than ~3 s. The 30 s fallback (Lost) is unaffected.
+- **Scrobbling only while SONE runs.** Tracks are scrobbled only while SONE is running and attached. If Sonos's own Last.fm link is also on, tracks queued by other apps *with* metadata may be scrobbled twice (§4).
+- **Probed firmware.** Only firmware 94.1 (S2) was probed. URI flags and metadata handling may differ on other firmware.
