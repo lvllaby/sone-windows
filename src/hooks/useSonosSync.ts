@@ -186,8 +186,13 @@ export function useSonosSync() {
       return target.type === "sonos" ? target.coordinatorId : null;
     };
 
-    /** Writes history/current/queue from the resolved tracks and the current index. */
+    /**
+     * Writes history/current/queue from the resolved tracks and the current
+     * index. Not during a handoff: the group's old queue may still arrive
+     * then, and the handoff owns the atoms (re-applied once it ends).
+     */
     const applyMirror = () => {
+      if (store.get(sonosHandoffAtom)) return;
       const coordinatorId = targetCoordinator();
       const state = store.get(sonosStateAtom);
       if (!coordinatorId || !state || state.coordinatorId !== coordinatorId) {
@@ -218,6 +223,7 @@ export function useSonosSync() {
     const resolveAndMirror = async (q: SonosQueue | null) => {
       const gen = ++queueGen;
       const coordinatorId = targetCoordinator();
+      if (store.get(sonosHandoffAtom)) return;
       if (!q || !coordinatorId || q.coordinatorId !== coordinatorId) return;
       const tracks = await resolveItems(q.items);
       // A newer queue (or a target change) arrived while resolving
@@ -468,6 +474,17 @@ export function useSonosSync() {
       void resolveAndMirror(store.get(sonosQueueAtom));
     });
 
+    // A handoff ended: mirror the latest queue/state received (useSonosHandoff
+    // drops what predates its load), dropping anything resolved before.
+    const unsubHandoff = store.sub(sonosHandoffAtom, () => {
+      if (store.get(sonosHandoffAtom)) return;
+      lastSliceKey = null;
+      mirrorTracks = [];
+      queueGen++;
+      applyMirror(); // TV input etc. needs no queue
+      void resolveAndMirror(store.get(sonosQueueAtom));
+    });
+
     if (import.meta.env.DEV) {
       window.__sonosDebugSetTarget = (coordinatorId, name) =>
         store.set(playbackTargetAtom, { type: "sonos", coordinatorId, name });
@@ -475,6 +492,7 @@ export function useSonosSync() {
 
     return () => {
       disposed = true;
+      unsubHandoff();
       unsubTarget();
       unsubRepeat();
       unlistens.forEach((p) => p.then((fn) => fn()).catch(() => {}));

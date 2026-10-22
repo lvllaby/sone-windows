@@ -24,6 +24,7 @@ import {
 import {
   sonosGroupsAtom,
   sonosHandoffAtom,
+  sonosQueueAtom,
   sonosStateAtom,
 } from "../atoms/sonos";
 import {
@@ -49,6 +50,9 @@ import { seekAfterStart, usePlaybackActions } from "./usePlaybackActions";
 
 type Store = ReturnType<typeof useStore>;
 type ShowToast = ReturnType<typeof useToast>["showToast"];
+
+/** A selected group that sends no state at all this long counts as lost. */
+const NO_STATE_TIMEOUT_MS = 30_000;
 
 /** Startup reattach happens at most once per app session (survives remounts). */
 let autoAttachDone = false;
@@ -115,6 +119,12 @@ function keepMirroredQueue(store: Store): Track | null {
   return current;
 }
 
+/** Drops a group's polled state and queue so they can never be mirrored later. */
+function forgetGroupState(store: Store) {
+  store.set(sonosStateAtom, null);
+  store.set(sonosQueueAtom, null);
+}
+
 /** Follows a group's own queue: SONE's manual queue and shuffle order don't apply. */
 function enterMirrorMode(store: Store, coordinatorId: string, name: string) {
   store.set(manualQueueAtom, []);
@@ -166,26 +176,30 @@ function useSwitchTarget() {
         !isTrackUnavailable(snap.current);
       try {
         if (fromGroup) {
+          // Leaving the old group: it pauses, its play stops counting
           await sonosPause().catch(warn("pause before switching"));
+          await invoke("notify_track_stopped").catch(() => {});
+          forgetGroupState(store);
         } else if (loadable && snap.wasPlaying) {
           await pauseTrack();
         }
         await sonosSelectGroup(coordinatorId, false);
         if (!loadable) {
           // Nothing to send: just follow what the group plays
-          if (fromGroup) await invoke("notify_track_stopped").catch(() => {});
           enterMirrorMode(store, coordinatorId, name);
           return;
         }
+        // The mirror stands still during the handoff, so the atoms stay ours
         store.set(playbackTargetAtom, { type: "sonos", coordinatorId, name });
-        // The new target mirrors the group's last known state at once; load ours
-        restoreQueue(store, snap);
         const loaded = await sonos.loadFromAtoms(
           snap.wasPlaying,
           snap.position,
           { forHandoff: true },
         );
         if (!loaded) throw new Error("nothing to load");
+        // Whatever arrived before the load finished is the group's old queue;
+        // the poller reports the new one (and state) next
+        forgetGroupState(store);
         // The load keeps the group's play mode; bring ours along
         await sonosSetPlayMode(snap.repeat).catch(warn("set play mode"));
         store.set(pendingResumePositionAtom, null);
@@ -198,12 +212,13 @@ function useSwitchTarget() {
       } catch (error) {
         toastHandoffError(showToast, error, name);
         store.set(playbackTargetAtom, { type: "local" });
-        await sonosSelectGroup(null, false).catch(warn("deselect"));
+        // Forget the failed group too, or the next launch reattaches to it
+        await sonosSelectGroup(null, true).catch(warn("deselect"));
+        forgetGroupState(store);
         restoreQueue(store, snap);
         store.set(repeatAtom, snap.repeat);
         if (fromGroup) {
           // The old group is paused already: carry on here, paused
-          await invoke("notify_track_stopped").catch(() => {});
           const current = keepMirroredQueue(store);
           store.set(isPlayingAtom, false);
           store.set(pendingResumePositionAtom, current ? snap.position : null);
@@ -226,6 +241,7 @@ function useSwitchTarget() {
     await invoke("notify_track_stopped").catch(() => {});
     await sonosPause().catch(warn("pause before switching"));
     await sonosSelectGroup(null, true).catch(warn("deselect"));
+    forgetGroupState(store);
     store.set(playbackTargetAtom, { type: "local" });
     const current = keepMirroredQueue(store);
     if (!current) {
@@ -234,12 +250,14 @@ function useSwitchTarget() {
     }
     if (wasPlaying) {
       const result = await playTrack(current, { skipHistoryPush: true });
-      if (result.ok && position > 0) await seekAfterStart(store, position);
-    } else {
-      // Loaded on resume (resumeTrack seeks there once it has started)
-      store.set(isPlayingAtom, false);
-      store.set(pendingResumePositionAtom, position);
+      if (result.ok) {
+        if (position > 0) await seekAfterStart(store, position);
+        return;
+      }
     }
+    // Loaded on resume (resumeTrack seeks there once it has started)
+    store.set(isPlayingAtom, false);
+    store.set(pendingResumePositionAtom, position);
   }, [store, playTrack]);
 
   /** `to` is "local" (This computer) or a group's coordinator id. */
@@ -346,17 +364,27 @@ export function useSonosAutoAttach() {
     };
   }, [store]);
 
-  // Unreachable fallback: the poller reports "lost" after ~30 s. Go back to
-  // This computer without playing, keeping the remembered group.
+  // Unreachable fallback: the poller reports "lost" after ~30 s; a group
+  // that never answered at all gets the same after NO_STATE_TIMEOUT_MS. Go
+  // back to This computer without playing, keeping the remembered group.
   useEffect(() => {
-    /** The lost state already handled (the atom keeps holding it afterwards). */
+    /** The lost state already handled (once per loss). */
     let handled: SonosState | null = null;
+    /** Coordinator whose watchdog ran out without any state from it. */
+    let silent: string | null = null;
+    let watchdog: ReturnType<typeof setTimeout> | null = null;
 
-    const fallBack = async (name: string, position: number) => {
+    const stopWatchdog = () => {
+      if (watchdog !== null) clearTimeout(watchdog);
+      watchdog = null;
+    };
+
+    const fallBack = async (name: string, position: number | null) => {
       store.set(sonosHandoffAtom, { to: "local" });
       try {
         await invoke("notify_track_stopped").catch(() => {});
         await sonosSelectGroup(null, false).catch(warn("deselect"));
+        forgetGroupState(store);
         store.set(playbackTargetAtom, { type: "local" });
         const current = keepMirroredQueue(store);
         store.set(isPlayingAtom, false);
@@ -371,22 +399,38 @@ export function useSonosAutoAttach() {
     const check = () => {
       const target = store.get(playbackTargetAtom);
       const state = store.get(sonosStateAtom);
-      if (store.get(sonosHandoffAtom) || target.type !== "sonos") return;
-      if (
-        !state ||
-        state === handled ||
-        state.coordinatorId !== target.coordinatorId ||
-        state.reachability !== "lost"
-      ) {
-        return;
-      }
-      handled = state;
-      void fallBack(target.name, state.positionSecs);
+      if (target.type !== "sonos") return;
+      const fromTarget = state?.coordinatorId === target.coordinatorId;
+      if (fromTarget) stopWatchdog();
+      if (store.get(sonosHandoffAtom)) return;
+      const lost =
+        fromTarget && state.reachability === "lost" && state !== handled;
+      if (!lost && silent !== target.coordinatorId) return;
+      if (lost) handled = state;
+      silent = null;
+      void fallBack(target.name, lost ? state.positionSecs : null);
     };
 
+    // Every selected group must report within the timeout (the poller only
+    // reports "lost" for a group it reached at least once).
+    const unsubTarget = store.sub(playbackTargetAtom, () => {
+      stopWatchdog();
+      silent = null;
+      const target = store.get(playbackTargetAtom);
+      if (target.type !== "sonos") return;
+      const coordinatorId = target.coordinatorId;
+      if (store.get(sonosStateAtom)?.coordinatorId === coordinatorId) return;
+      watchdog = setTimeout(() => {
+        watchdog = null;
+        silent = coordinatorId;
+        check();
+      }, NO_STATE_TIMEOUT_MS);
+    });
     const unsubState = store.sub(sonosStateAtom, check);
     const unsubHandoff = store.sub(sonosHandoffAtom, check);
     return () => {
+      stopWatchdog();
+      unsubTarget();
       unsubState();
       unsubHandoff();
     };

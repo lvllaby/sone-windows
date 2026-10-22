@@ -119,18 +119,25 @@ type Store = ReturnType<typeof useStore>;
 const SEEK_RETRY_DELAY = 150;
 const SEEK_MAX_RETRIES = 10;
 
+/** Bumped by local seeks and pauses: a pending seekAfterStart stops retrying. */
+let seekAfterStartGen = 0;
+
 /** Seeks a local track that was just started. The pipeline may not take a
  *  seek until it has prerolled, so failed attempts are retried for ~1.5 s;
- *  gives up if the current track changes meanwhile. */
+ *  gives up once the user seeks or pauses, or the current track changes. */
 export async function seekAfterStart(store: Store, positionSecs: number) {
+  const gen = ++seekAfterStartGen;
   const track = store.get(currentTrackAtom);
+  const stale = () =>
+    gen !== seekAfterStartGen || store.get(currentTrackAtom) !== track;
   for (let attempt = 0; ; attempt++) {
-    if (store.get(currentTrackAtom) !== track) return;
+    if (stale()) return;
     try {
       await invoke("seek_track", { positionSecs });
-      notifySeek(positionSecs);
+      if (!stale()) notifySeek(positionSecs);
       return;
     } catch (error) {
+      if (stale()) return;
       if (attempt >= SEEK_MAX_RETRIES) {
         console.error("Failed to seek after start:", error);
         return;
@@ -234,6 +241,8 @@ export function usePlaybackActions() {
         store.set(historyAtom, previousHistory);
         return { ok: false, reason: "transient" };
       }
+      // A fresh pipeline: a resume point from a Sonos handoff no longer applies
+      store.set(pendingResumePositionAtom, null);
 
       try {
         const info = await invokePlayWithRetry(
@@ -287,6 +296,7 @@ export function usePlaybackActions() {
 
   const pauseTrack = useCallback(async () => {
     if (sonos.isCasting()) return sonos.pause();
+    seekAfterStartGen++;
     try {
       await invoke("pause_track");
       store.set(isPlayingAtom, false);
@@ -336,6 +346,7 @@ export function usePlaybackActions() {
         }
       } else {
         await invoke("resume_track");
+        store.set(pendingResumePositionAtom, null);
       }
       store.set(isPlayingAtom, true);
     } catch (error) {
@@ -371,6 +382,7 @@ export function usePlaybackActions() {
 
   const seekTo = useCallback(async (positionSecs: number) => {
     if (sonos.isCasting()) return sonos.seek(positionSecs);
+    seekAfterStartGen++;
     if (store.get(pendingResumePositionAtom) !== null) {
       // Stopped after a Sonos handoff: no pipeline yet, move the resume point
       store.set(pendingResumePositionAtom, positionSecs);
