@@ -125,21 +125,21 @@ export function resetSonosQueueState(store: Store) {
 /**
  * Keeps the "play next" block in step when the Sonos index moves: advancing
  * consumes it, going back puts the skipped-back tracks in front of it.
- * `sameTrack` means the index moved under the same track (items inserted or
+ * `shifted` means the index moved under the same track (items inserted or
  * removed before it), which leaves the block alone. Call on every state.
  */
 export function trackPendingIndexChange(
   store: Store,
   prev: number | null,
   next: number | null,
-  sameTrack: boolean,
+  shifted: boolean,
 ) {
   if (loadIndex) {
     // The load's history prepend moves the index; that's not playback.
     if (next === loadIndex.index || !loadWindowActive()) loadIndex = null;
     return;
   }
-  if (prev === next || pendingIds.length === 0 || sameTrack) return;
+  if (prev === next || pendingIds.length === 0 || shifted) return;
   if (prev == null || next == null) {
     setPending(store, []);
     return;
@@ -273,14 +273,47 @@ export function createSonosActions(store: Store, showToast: ShowToast) {
     void send(() => sonosSetGroupVolume(Math.round(level * 100)));
   };
 
+  /**
+   * True (after toasting) when the upcoming queue (or `replacement`) holds
+   * non-TIDAL items, which replacing it would delete: Sonos only takes TIDAL
+   * ids back. The reorder and shuffle guards check this before touching the
+   * atoms; clearing (an empty replacement) is still allowed.
+   */
+  const refusesReorder = (replacement: Track[] = []): boolean => {
+    const foreign = (t: Track) => t.id <= 0;
+    if (!store.get(queueAtom).some(foreign) && !replacement.some(foreign)) {
+      return false;
+    }
+    showToast(
+      "This queue has items from other sources and can't be reordered from SONE",
+      "info",
+    );
+    return true;
+  };
+
   return {
     isCasting: () => store.get(playbackTargetAtom).type === "sonos",
+    refusesReorder,
 
-    /** Replaces the Sonos queue with history/current/manual/queue from the atoms. */
-    async loadFromAtoms(play: boolean, positionSecs = 0): Promise<void> {
-      if (locked()) return;
+    /**
+     * Replaces the Sonos queue with history/current/manual/queue from the
+     * atoms. Resolves true once Sonos has it, false otherwise (nothing to
+     * load, locked, or failed after toasting).
+     *
+     * `forHandoff` is for the handoff (useSonosHandoff), which sets
+     * sonosHandoffAtom before loading: it ignores the handoff lock, never
+     * toasts, and rethrows the backend error unchanged so the handoff can
+     * roll back and pick its own message (e.g. on SONOS_SN_UNKNOWN).
+     */
+    async loadFromAtoms(
+      play: boolean,
+      positionSecs = 0,
+      opts?: { forHandoff?: boolean },
+    ): Promise<boolean> {
+      const forHandoff = opts?.forHandoff ?? false;
+      if (locked() && !forHandoff) return false;
       const current = store.get(currentTrackAtom);
-      if (!current || current.id <= 0) return;
+      if (!current || current.id <= 0) return false;
       // Mirrored placeholders (non-TIDAL items) have no id Sonos could load
       const history = store.get(historyAtom).filter((t) => t.id > 0);
       const manual = store.get(manualQueueAtom).filter((t) => t.id > 0);
@@ -296,8 +329,10 @@ export function createSonosActions(store: Store, showToast: ShowToast) {
           sonosLoadQueue(flat.trackIds, flat.startIndex, positionSecs, play),
         );
         loadIndex = { index: flat.startIndex, at: Date.now() };
+        return true;
       } catch (error) {
         overflow = [];
+        if (forHandoff) throw error;
         if (safeErrorMessage(error, "") === SONOS_SN_UNKNOWN) {
           console.error("[sonos] load failed:", error);
           showToast(
@@ -307,6 +342,7 @@ export function createSonosActions(store: Store, showToast: ShowToast) {
         } else {
           fail(error);
         }
+        return false;
       }
     },
 
@@ -449,6 +485,7 @@ export function createSonosActions(store: Store, showToast: ShowToast) {
     /** Replaces everything after the current track (reorder, shuffle, clear). */
     async replaceUpcoming(tracks: Track[]): Promise<void> {
       if (locked() || currentIndex(true) == null) return;
+      if (tracks.length > 0 && refusesReorder(tracks)) return;
       const next = playable(tracks);
       primeSonosTrackCache(next);
       setPending(store, []);
@@ -481,6 +518,8 @@ export function createSonosActions(store: Store, showToast: ShowToast) {
         if (pendingVolume === null) return;
         const value = pendingVolume;
         pendingVolume = null;
+        // A trailing value must not reach a group we've since left
+        if (locked() || store.get(playbackTargetAtom).type !== "sonos") return;
         sendVolume(value);
         volumeTimer = setTimeout(flush, VOLUME_THROTTLE_MS);
       };

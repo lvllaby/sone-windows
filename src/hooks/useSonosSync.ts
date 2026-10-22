@@ -248,10 +248,19 @@ export function useSonosSync() {
      * Scrobbling: a new (index, TIDAL id) pair that is playing is a new play,
      * so a repeat of the same track at a new index counts again; playing ↔
      * paused on that play maps to paused/resumed. Placeholders never count.
+     * `shiftedFrom` is the previous pair when the index only moved under the
+     * same track (load prepend, edits before it): that play carries over.
      */
-    const scrobble = (state: SonosState, tidalId: number | null) => {
+    const scrobble = (
+      state: SonosState,
+      tidalId: number | null,
+      shiftedFrom: string | null,
+    ) => {
       const pair = `${state.trackIndex}|${tidalId}`;
       const transport = state.transportState;
+      if (shiftedFrom !== null && startedPair === shiftedFrom) {
+        startedPair = pair;
+      }
       if (store.get(sonosHandoffAtom)) {
         // The handoff itself isn't a play: note where we are, send nothing
         startedPair = pair;
@@ -336,12 +345,23 @@ export function useSonosSync() {
         state.currentItem?.kind === "tidal"
           ? state.currentItem.tidalTrackId
           : null;
-      trackPendingIndexChange(
-        store,
-        prevIndex,
-        state.trackIndex,
-        tidalId != null && tidalId === prevTidalId,
-      );
+      // Same track at a new index: a shift (prepend, edits before it) unless
+      // playback moved forward onto a repeat of it (the old slot still holds
+      // the same id).
+      const q = store.get(sonosQueueAtom);
+      const items = q?.coordinatorId === state.coordinatorId ? q.items : null;
+      const replayed =
+        prevIndex != null &&
+        state.trackIndex != null &&
+        state.trackIndex > prevIndex &&
+        items?.[prevIndex]?.tidalTrackId === tidalId;
+      const shifted =
+        tidalId != null &&
+        tidalId === prevTidalId &&
+        prevIndex !== state.trackIndex &&
+        !replayed;
+      const shiftedFrom = shifted ? `${prevIndex}|${prevTidalId}` : null;
+      trackPendingIndexChange(store, prevIndex, state.trackIndex, shifted);
       prevIndex = state.trackIndex;
       prevTidalId = tidalId;
 
@@ -351,7 +371,7 @@ export function useSonosSync() {
       ) {
         store.set(consecutiveFailCountAtom, 0);
       }
-      scrobble(state, tidalId);
+      scrobble(state, tidalId, shiftedFrom);
 
       // Re-slice only when the current track changed, not on every poll
       const key = `${state.trackIndex}|${state.currentItem?.title ?? ""}`;

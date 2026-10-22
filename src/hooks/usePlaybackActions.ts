@@ -201,8 +201,11 @@ export function usePlaybackActions() {
       store.set(currentTrackAtom, stamped);
       // Casting: Sonos plays it; useSonosSync scrobbles from the mirrored state
       if (sonos.isCasting()) {
-        await sonos.loadFromAtoms(true);
-        return { ok: true };
+        if (await sonos.loadFromAtoms(true)) return { ok: true };
+        // Load failed (already toasted): roll back like the local path
+        store.set(currentTrackAtom, previousTrack);
+        store.set(historyAtom, previousHistory);
+        return { ok: false, reason: "transient" };
       }
 
       try {
@@ -389,6 +392,7 @@ export function usePlaybackActions() {
       },
     ) => {
       if (options?.reorder) {
+        if (sonos.isCasting() && sonos.refusesReorder()) return;
         // Drag-and-drop reorder: preserve existing _qids, split back into manual/context
         const mc = options.manualCount ?? 0;
         const stamped = tracks.map((t) => ensureQid(normalizeTrack(t)));
@@ -1016,6 +1020,7 @@ export function usePlaybackActions() {
   }, [store, showToast, seekTo, sonos]);
 
   const toggleShuffle = useCallback(() => {
+    if (sonos.isCasting() && sonos.refusesReorder()) return;
     const current = store.get(shuffleAtom);
     if (!current) {
       // Turning ON: save current queue as original, then shuffle

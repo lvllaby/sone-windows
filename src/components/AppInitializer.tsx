@@ -92,7 +92,6 @@ import { ensureQid, advanceCounterPast } from "../lib/qid";
 import {
   initPositionInterpolator,
   destroyPositionInterpolator,
-  notifySeek,
   getInterpolatedPosition,
 } from "../lib/playbackPosition";
 
@@ -942,8 +941,8 @@ export function AppInitializer() {
       try {
         const current = await invoke<number>("get_playback_position");
         const newPos = Math.max(0, current + event.payload);
-        await invoke("seek_track", { positionSecs: newPos });
-        notifySeek(newPos);
+        // seekTo does seek_track + notifySeek locally, and reaches Sonos while casting
+        await seekTo(newPos);
       } catch {}
     });
     const unlistenVolume = listen<number>("mpris:set-volume", (event) => {
