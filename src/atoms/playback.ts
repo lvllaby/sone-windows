@@ -39,3 +39,7 @@ export type PlaybackTarget =
   | { type: "sonos"; coordinatorId: string; name: string };
 
 export const playbackTargetAtom = atom<PlaybackTarget>({ type: "local" });
+
+/** Position to seek to when a stopped track is next resumed (set when
+ *  switching from a paused Sonos group to This computer). */
+export const pendingResumePositionAtom = atom<number | null>(null);

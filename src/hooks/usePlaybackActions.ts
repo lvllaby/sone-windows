@@ -29,6 +29,7 @@ import {
   allowExplicitAtom,
   bitPerfectAtom,
   consecutiveFailCountAtom,
+  pendingResumePositionAtom,
 } from "../atoms/playback";
 import { getMixItems, checkNetworkError } from "../api/tidal";
 import { useToast } from "../contexts/ToastContext";
@@ -111,6 +112,32 @@ function fisherYatesShuffle<T>(arr: T[]): T[] {
     [a[i], a[j]] = [a[j], a[i]];
   }
   return a;
+}
+
+type Store = ReturnType<typeof useStore>;
+
+const SEEK_RETRY_DELAY = 150;
+const SEEK_MAX_RETRIES = 10;
+
+/** Seeks a local track that was just started. The pipeline may not take a
+ *  seek until it has prerolled, so failed attempts are retried for ~1.5 s;
+ *  gives up if the current track changes meanwhile. */
+export async function seekAfterStart(store: Store, positionSecs: number) {
+  const track = store.get(currentTrackAtom);
+  for (let attempt = 0; ; attempt++) {
+    if (store.get(currentTrackAtom) !== track) return;
+    try {
+      await invoke("seek_track", { positionSecs });
+      notifySeek(positionSecs);
+      return;
+    } catch (error) {
+      if (attempt >= SEEK_MAX_RETRIES) {
+        console.error("Failed to seek after start:", error);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, SEEK_RETRY_DELAY));
+    }
+  }
 }
 
 const DEVICE_RETRY_DELAY = 500;
@@ -300,6 +327,13 @@ export function usePlaybackActions() {
             trackId: track.id || null,
           },
         }).catch(() => {});
+
+        // Picking up where a Sonos group left off (useSonosHandoff)
+        const resumeAt = store.get(pendingResumePositionAtom);
+        if (resumeAt !== null) {
+          store.set(pendingResumePositionAtom, null);
+          void seekAfterStart(store, resumeAt);
+        }
       } else {
         await invoke("resume_track");
       }
@@ -337,13 +371,19 @@ export function usePlaybackActions() {
 
   const seekTo = useCallback(async (positionSecs: number) => {
     if (sonos.isCasting()) return sonos.seek(positionSecs);
+    if (store.get(pendingResumePositionAtom) !== null) {
+      // Stopped after a Sonos handoff: no pipeline yet, move the resume point
+      store.set(pendingResumePositionAtom, positionSecs);
+      notifySeek(positionSecs);
+      return;
+    }
     try {
       await invoke("seek_track", { positionSecs });
       notifySeek(positionSecs);
     } catch (error) {
       console.error("Failed to seek:", error);
     }
-  }, [sonos]);
+  }, [store, sonos]);
 
   const addToQueue = useCallback(
     (track: Track, source?: ManualTrackSource) => {

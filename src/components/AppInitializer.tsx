@@ -51,6 +51,7 @@ import {
   shuffleAtom,
   repeatAtom,
   streamInfoAtom,
+  playbackTargetAtom,
 } from "../atoms/playback";
 import { decorationsAtom, drawerOpenAtom, maximizedPlayerAtom } from "../atoms/ui";
 import { proxySettingsAtom, type ProxySettings } from "../atoms/proxy";
@@ -60,6 +61,7 @@ import { usePlaybackActions } from "../hooks/usePlaybackActions";
 import { useFavorites } from "../hooks/useFavorites";
 import { useShortcuts } from "../hooks/useShortcuts";
 import { useSonosSync } from "../hooks/useSonosSync";
+import { useSonosAutoAttach } from "../hooks/useSonosHandoff";
 import { useToast } from "../contexts/ToastContext";
 import {
   checkNetworkError,
@@ -103,8 +105,9 @@ type RuntimeTrackFields = {
   _contextFrom?: unknown;
 };
 
+// Ids <= 0 are Sonos placeholders (non-TIDAL items mirrored while casting)
 function isValidTrack(t: unknown): t is Track {
-  return !!t && typeof (t as Track).id === "number";
+  return !!t && typeof (t as Track).id === "number" && (t as Track).id > 0;
 }
 
 function stripRuntimeTrackFields(track: Track): Track {
@@ -160,6 +163,7 @@ export function AppInitializer() {
   const setDecorations = useSetAtom(decorationsAtom);
   const { showToast } = useToast();
   useSonosSync();
+  useSonosAutoAttach();
 
   // ---- Store for one-time reads (volume, queue, history, etc.) — no subscription ----
   const store = useStore();
@@ -448,23 +452,21 @@ export function AppInitializer() {
     let latestJson: string | null = null;
 
     const restoreSnapshot = (raw: string) => {
+      // Already attached to a Sonos group: its queue is mirrored instead
+      if (store.get(playbackTargetAtom).type === "sonos") return;
       const parsed = JSON.parse(raw) as Partial<PlaybackSnapshot>;
 
       const restoredCurrentTrack =
-        parsed.currentTrack && typeof parsed.currentTrack.id === "number"
+        parsed.currentTrack && isValidTrack(parsed.currentTrack)
           ? stripRuntimeTrackFields(parsed.currentTrack as Track)
           : null;
 
       const restoredQueue = Array.isArray(parsed.queue)
-        ? parsed.queue
-            .filter((t): t is Track => !!t && typeof t.id === "number")
-            .map(stripRuntimeTrackFields)
+        ? parsed.queue.filter(isValidTrack).map(stripRuntimeTrackFields)
         : [];
 
       const restoredHistory = Array.isArray(parsed.history)
-        ? parsed.history
-            .filter((t): t is Track => !!t && typeof t.id === "number")
-            .map(stripRuntimeTrackFields)
+        ? parsed.history.filter(isValidTrack).map(stripRuntimeTrackFields)
         : [];
       const cappedHistory =
         restoredHistory.length > MAX_HISTORY_TRACKS
