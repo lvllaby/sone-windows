@@ -40,7 +40,7 @@ export interface MemberVolume {
 export interface SonosState {
   coordinatorId: string;
   transportState: TransportState;
-  /** 0-based queue index; null when not playing from the queue (TV input). */
+  /** 0-based queue index; null when not playing from the queue (TV input, radio, line-in, other apps). */
   trackIndex: number | null;
   positionSecs: number;
   durationSecs: number | null;
@@ -58,6 +58,8 @@ export interface SonosQueue {
   coordinatorId: string;
   updateId: number;
   items: QueueItem[];
+  /** A load's back-fill (or appends queued behind it) is still running: `items` is partial. */
+  backfilling: boolean;
 }
 
 interface SonosSnapshot {
@@ -101,13 +103,14 @@ export async function sonosGroupNowPlaying(
   return invoke<QueueItem | null>("sonos_group_now_playing", { coordinatorId });
 }
 
+/** Resolves true when a back-fill continues in the background. */
 export async function sonosLoadQueue(
   trackIds: number[],
   startIndex: number,
   positionSecs: number,
   play: boolean,
-): Promise<void> {
-  return invoke("sonos_load_queue", {
+): Promise<boolean> {
+  return invoke<boolean>("sonos_load_queue", {
     trackIds,
     startIndex,
     positionSecs,
@@ -144,6 +147,11 @@ export async function sonosQueueInsert(
   at: number,
 ): Promise<void> {
   return invoke("sonos_queue_insert", { trackIds, at });
+}
+
+/** Appends at the end; during a load's back-fill, behind it (in order). */
+export async function sonosQueueAppend(trackIds: number[]): Promise<void> {
+  return invoke("sonos_queue_append", { trackIds });
 }
 
 export async function sonosQueueRemove(index: number): Promise<void> {

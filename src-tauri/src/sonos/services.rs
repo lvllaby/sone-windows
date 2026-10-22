@@ -279,6 +279,18 @@ pub async fn position_info(soap: &SoapClient, ip: &str) -> Result<PositionInfo, 
     ))
 }
 
+/// Whether a transport `CurrentURI` (from [`media_info`]) is the speaker's own
+/// queue, as opposed to radio, line-in, the TV input, Spotify Connect, AirPlay…
+pub fn is_queue_uri(current_uri: &str) -> bool {
+    current_uri.starts_with("x-rincon-queue:")
+}
+
+/// The transport's `CurrentURI` (what it plays from, not the current track).
+pub async fn media_info(soap: &SoapClient, ip: &str) -> Result<String, SoneError> {
+    let r = av(soap, ip, "GetMediaInfo", &[]).await?;
+    Ok(require(&r, "GetMediaInfo", "CurrentURI")?.clone())
+}
+
 pub async fn get_play_mode(soap: &SoapClient, ip: &str) -> Result<String, SoneError> {
     let r = av(soap, ip, "GetTransportSettings", &[]).await?;
     Ok(require(&r, "GetTransportSettings", "PlayMode")?.clone())
@@ -466,6 +478,21 @@ mod tests {
         assert_eq!(b.total_matches, 10);
         assert_eq!(b.update_id, 47);
         assert!(b.didl.starts_with("<DIDL-Lite"));
+    }
+
+    #[test]
+    fn queue_uri_detection() {
+        assert!(is_queue_uri("x-rincon-queue:RINCON_00000000000101400#0"));
+        assert!(!is_queue_uri(
+            "x-sonos-htastream:RINCON_00000000000301400:spdif"
+        ));
+        assert!(!is_queue_uri(
+            "x-sonosapi-stream:s24896?sid=254&flags=8224&sn=0"
+        ));
+        assert!(!is_queue_uri(
+            "x-sonos-vli:RINCON_00000000000101400:1,spotify:abc"
+        ));
+        assert!(!is_queue_uri(""));
     }
 
     #[test]

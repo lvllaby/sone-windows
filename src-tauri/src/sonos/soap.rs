@@ -155,7 +155,9 @@ pub fn parse_hms(s: &str) -> Option<f64> {
     if parts.next().is_some() || !sec.is_finite() || sec < 0.0 {
         return None;
     }
-    Some((h * 3600 + m * 60) as f64 + sec)
+    // Checked: a garbage huge hour count must not overflow (panic in debug).
+    let whole = h.checked_mul(3600)?.checked_add(m.checked_mul(60)?)?;
+    Some(whole as f64 + sec)
 }
 
 /// Format seconds as `H:MM:SS` (fractions truncated).
@@ -276,5 +278,13 @@ mod tests {
         assert_eq!(parse_hms(""), None);
         assert_eq!(parse_hms("0:00:00"), Some(0.0));
         assert_eq!(format_hms(3725.4), "1:02:05");
+    }
+
+    #[test]
+    fn parse_hms_huge_hours_do_not_overflow() {
+        assert_eq!(parse_hms("18446744073709551615:00:00"), None);
+        assert_eq!(parse_hms("0:18446744073709551615:00"), None);
+        // Just past u64::MAX / 3600.
+        assert_eq!(parse_hms("5124095576030432:00:00"), None);
     }
 }

@@ -30,7 +30,9 @@ import {
   bitPerfectAtom,
   consecutiveFailCountAtom,
   pendingResumePositionAtom,
+  preMuteVolumeAtom,
 } from "../atoms/playback";
+import { sonosGroupVolumeAtom, sonosStateAtom } from "../atoms/sonos";
 import { getMixItems, checkNetworkError } from "../api/tidal";
 import { useToast } from "../contexts/ToastContext";
 import { stampQid, stampQids, ensureQid } from "../lib/qid";
@@ -388,6 +390,30 @@ export function usePlaybackActions() {
     [sonos],
   );
 
+  /** Volume up/down by `delta` (0-1): the group volume while casting, else the local one. */
+  const adjustVolume = useCallback(
+    (delta: number) => {
+      const from = sonos.isCasting()
+        ? store.get(sonosGroupVolumeAtom)
+        : store.get(volumeAtom);
+      return setVolume(Math.max(0, Math.min(1, from + delta)));
+    },
+    [store, sonos, setVolume],
+  );
+
+  /** Mute toggle: the group's mute while casting; locally volume 0 and back. */
+  const toggleMute = useCallback(() => {
+    if (sonos.isCasting()) {
+      return sonos.setMuted(!(store.get(sonosStateAtom)?.muted ?? false));
+    }
+    const vol = store.get(volumeAtom);
+    if (vol > 0) {
+      store.set(preMuteVolumeAtom, vol);
+      return setVolume(0);
+    }
+    return setVolume(store.get(preMuteVolumeAtom) || 0.5);
+  }, [store, sonos, setVolume]);
+
   const seekTo = useCallback(async (positionSecs: number) => {
     if (sonos.isCasting()) return sonos.seek(positionSecs);
     seekAfterStartGen++;
@@ -452,7 +478,12 @@ export function usePlaybackActions() {
       },
     ) => {
       if (options?.reorder) {
-        if (sonos.isCasting() && sonos.refusesReorder()) return;
+        if (
+          sonos.isCasting() &&
+          (sonos.refusesWhileLoading() || sonos.refusesReorder())
+        ) {
+          return;
+        }
         // Drag-and-drop reorder: preserve existing _qids, split back into manual/context
         const mc = options.manualCount ?? 0;
         const stamped = tracks.map((t) => ensureQid(normalizeTrack(t)));
@@ -1080,7 +1111,12 @@ export function usePlaybackActions() {
   }, [store, showToast, seekTo, sonos]);
 
   const toggleShuffle = useCallback(() => {
-    if (sonos.isCasting() && sonos.refusesReorder()) return;
+    if (
+      sonos.isCasting() &&
+      (sonos.refusesWhileLoading() || sonos.refusesReorder())
+    ) {
+      return;
+    }
     const current = store.get(shuffleAtom);
     if (!current) {
       // Turning ON: save current queue as original, then shuffle
@@ -1284,6 +1320,8 @@ export function usePlaybackActions() {
     resumeTrack,
     setVolume,
     setMuted,
+    adjustVolume,
+    toggleMute,
     seekTo,
     addToQueue,
     playNextInQueue,

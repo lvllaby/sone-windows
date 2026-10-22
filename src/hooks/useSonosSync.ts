@@ -56,6 +56,7 @@ import { isTrackUnavailable } from "../lib/trackAvailability";
 import type { Track } from "../types";
 import {
   createSonosActions,
+  noteSonosQueue,
   reconcilePendingWithQueue,
   resetSonosQueueState,
   trackPendingIndexChange,
@@ -246,9 +247,11 @@ export function useSonosSync() {
     /**
      * Scrobbling: a new (index, TIDAL id) pair that is playing is a new play,
      * so a repeat of the same track at a new index counts again; playing ↔
-     * paused on that play maps to paused/resumed. Placeholders never count.
-     * `shiftedFrom` is the previous pair when the index only moved under the
-     * same track (load prepend, edits before it): that play carries over.
+     * paused (or stopped) on that play maps to paused/resumed. Placeholders
+     * never count. `shiftedFrom` is the previous pair when the index only
+     * moved under the same track (load prepend, edits before it): that play
+     * carries over. During a handoff nothing is sent and no play is noted, so
+     * the first playing state after it always starts one.
      */
     const scrobble = (
       state: SonosState,
@@ -261,8 +264,9 @@ export function useSonosSync() {
         startedPair = pair;
       }
       if (store.get(sonosHandoffAtom)) {
-        // The handoff itself isn't a play: note where we are, send nothing
-        startedPair = pair;
+        // The handoff itself isn't a play: send nothing, and leave the play
+        // to the first playing state once it's over
+        startedPair = null;
         if (transport !== "transitioning") lastTransport = transport;
         return;
       }
@@ -273,9 +277,12 @@ export function useSonosSync() {
         return;
       }
       if (pair === startedPair && tidalId != null) {
-        if (lastTransport === "playing" && transport === "paused") {
+        const halted = transport === "paused" || transport === "stopped";
+        const wasHalted =
+          lastTransport === "paused" || lastTransport === "stopped";
+        if (lastTransport === "playing" && halted) {
           invoke("notify_track_paused").catch(() => {});
-        } else if (lastTransport === "paused" && transport === "playing") {
+        } else if (wasHalted && transport === "playing") {
           invoke("notify_track_resumed").catch(() => {});
         }
       }
@@ -333,7 +340,10 @@ export function useSonosSync() {
     const applyState = (state: SonosState | null) => {
       const coordinatorId = targetCoordinator();
       if (!state || state.coordinatorId !== coordinatorId) return;
-      store.set(isPlayingAtom, state.transportState === "playing");
+      // Transitioning (buffering, track change) keeps the last value: no flicker
+      if (state.transportState !== "transitioning") {
+        store.set(isPlayingAtom, state.transportState === "playing");
+      }
       if (state.repeat !== lastRepeat) {
         lastRepeat = state.repeat;
         knownRepeat = state.repeat;
@@ -429,6 +439,7 @@ export function useSonosSync() {
       listen<SonosQueue>("sonos-queue", (e) => {
         store.set(sonosQueueAtom, e.payload);
         if (e.payload.coordinatorId === targetCoordinator()) {
+          noteSonosQueue(e.payload);
           reconcilePendingWithQueue(store, e.payload);
         }
         void resolveAndMirror(e.payload);
@@ -471,6 +482,9 @@ export function useSonosSync() {
     // drops what predates its load), dropping anything resolved before.
     const unsubHandoff = store.sub(sonosHandoffAtom, () => {
       if (store.get(sonosHandoffAtom)) return;
+      // Whatever played before isn't this group's play: the next playing
+      // state starts one (scrobble)
+      startedPair = null;
       lastSliceKey = null;
       mirrorTracks = [];
       queueGen++;

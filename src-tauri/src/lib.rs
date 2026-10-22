@@ -703,6 +703,7 @@ pub fn run() {
             commands::sonos::sonos_seek,
             commands::sonos::sonos_play_index,
             commands::sonos::sonos_queue_insert,
+            commands::sonos::sonos_queue_append,
             commands::sonos::sonos_queue_remove,
             commands::sonos::sonos_queue_replace_after,
             commands::sonos::sonos_queue_clear,

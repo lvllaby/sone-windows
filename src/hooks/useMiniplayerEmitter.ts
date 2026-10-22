@@ -9,9 +9,10 @@ import {
   playbackSourceAtom,
   contextSourceAtom,
   bitPerfectAtom,
+  playbackTargetAtom,
 } from "../atoms/playback";
 import { favoriteTrackIdsAtom } from "../atoms/favorites";
-import { sonosPlayingOnAtom } from "../atoms/sonos";
+import { sonosGroupVolumeAtom, sonosPlayingOnAtom } from "../atoms/sonos";
 import { miniplayerOpenAtom } from "../atoms/ui";
 import { getInterpolatedPosition } from "../lib/playbackPosition";
 import { usePlaybackActions } from "./usePlaybackActions";
@@ -60,7 +61,11 @@ export function useMiniplayerEmitter() {
     const isPlaying = store.get(isPlayingAtom);
     const shuffle = store.get(shuffleAtom);
     const repeat = store.get(repeatAtom);
-    const volume = store.get(volumeAtom);
+    // The effective volume: the Sonos group's while casting (set-volume routes there too)
+    const volume =
+      store.get(playbackTargetAtom).type === "sonos"
+        ? store.get(sonosGroupVolumeAtom)
+        : store.get(volumeAtom);
     const favoriteIds = store.get(favoriteTrackIdsAtom);
     const source = store.get(contextSourceAtom) || store.get(playbackSourceAtom);
 
@@ -130,6 +135,7 @@ export function useMiniplayerEmitter() {
       shuffleAtom,
       repeatAtom,
       volumeAtom,
+      sonosGroupVolumeAtom,
       favoriteTrackIdsAtom,
       playbackSourceAtom,
       contextSourceAtom,

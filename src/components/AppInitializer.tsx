@@ -40,7 +40,6 @@ import {
   queueAtom,
   historyAtom,
   volumeAtom,
-  preMuteVolumeAtom,
   exclusiveModeAtom,
   bitPerfectAtom,
   exclusiveDeviceAtom,
@@ -155,7 +154,7 @@ export function AppInitializer() {
   const setContextSource = useSetAtom(contextSourceAtom);
 
   // ---- Stable playback actions (no subscriptions) ----
-  const { playTrack, playNext, playPrevious, pauseTrack, resumeTrack, setVolume, toggleShuffle, seekTo } =
+  const { playTrack, playNext, playPrevious, pauseTrack, resumeTrack, setVolume, adjustVolume, toggleMute, toggleShuffle, seekTo } =
     usePlaybackActions();
   const { addFavoriteTrack, removeFavoriteTrack, favoriteTrackIds } =
     useFavorites();
@@ -818,6 +817,11 @@ export function AppInitializer() {
       }
     });
     const unlistenMprisStop = listen("mpris:stop", () => {
+      // Casting: stopping means pausing the group (the local pipeline is idle)
+      if (store.get(playbackTargetAtom).type === "sonos") {
+        pauseTrack();
+        return;
+      }
       invoke("stop_track").catch(() => {});
       store.set(isPlayingAtom, false);
     });
@@ -1010,17 +1014,10 @@ export function AppInitializer() {
     },
     nextTrack: () => playNext({ explicit: true }),
     prevTrack: () => playPrevious(),
-    volumeUp: () => setVolume(Math.min(1.0, store.get(volumeAtom) + 0.1)),
-    volumeDown: () => setVolume(Math.max(0.0, store.get(volumeAtom) - 0.1)),
-    muteToggle: () => {
-      const vol = store.get(volumeAtom);
-      if (vol > 0) {
-        store.set(preMuteVolumeAtom, vol);
-        setVolume(0);
-      } else {
-        setVolume(store.get(preMuteVolumeAtom) || 0.5);
-      }
-    },
+    // Casting-aware: the Sonos group's volume / mute while casting
+    volumeUp: () => adjustVolume(0.1),
+    volumeDown: () => adjustVolume(-0.1),
+    muteToggle: () => toggleMute(),
     likeToggle: () => {
       const track = store.get(currentTrackAtom);
       if (!track) return;

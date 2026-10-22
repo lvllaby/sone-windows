@@ -9,8 +9,9 @@
  * "Play next", "add to queue" and replacing the upcoming queue also need a
  * TIDAL current item. Every method is a no-op while a handoff is running.
  *
- * Queue state (pending "play next" block, overflow beyond the 1000-item cap)
- * is module-level, so every usePlaybackActions instance shares it.
+ * Queue state (pending "play next" block, overflow beyond the 1000-item cap,
+ * the queue length SONE expects) is module-level, so every
+ * usePlaybackActions instance shares it.
  */
 
 import { invoke } from "@tauri-apps/api/core";
@@ -23,6 +24,7 @@ import {
   sonosPlay,
   sonosPlayIndex,
   sonosPrevious,
+  sonosQueueAppend,
   sonosQueueInsert,
   sonosQueueRemove,
   sonosQueueReplaceAfter,
@@ -81,6 +83,17 @@ let overflowAnchor: number | null = null;
 let pendingIds: number[] = [];
 /** Index the current track will have once a load's history prepend is done. */
 let loadIndex: { index: number; at: number } | null = null;
+/**
+ * Sonos queue length as SONE expects it: the loaded total plus what SONE has
+ * added (or removed) since. Exact even while a back-fill or our own edits
+ * haven't shown up in the polled queue yet; null when SONE loaded nothing.
+ */
+let knownLength: number | null = null;
+/**
+ * A load whose back-fill runs on, until the polled queue's `backfilling`
+ * can be trusted: a queue polled before the load may still arrive after it.
+ */
+let loadBackfill: { at: number; total: number } | null = null;
 
 let queueChain: Promise<unknown> = Promise.resolve();
 let ownEditsInFlight = 0;
@@ -119,7 +132,36 @@ export function resetSonosQueueState(store: Store) {
   overflow = [];
   overflowAnchor = null;
   loadIndex = null;
+  knownLength = null;
+  loadBackfill = null;
   setPending(store, []);
+}
+
+/**
+ * Notes a polled queue of the casting group: once one reports a running
+ * back-fill, or holds everything the load sent, the `backfilling` flag of
+ * the polled queue is what counts.
+ */
+export function noteSonosQueue(q: SonosQueue) {
+  if (!loadBackfill) return;
+  if (q.backfilling || q.items.length >= loadBackfill.total) {
+    loadBackfill = null;
+  }
+}
+
+/** Whether the casting group's queue is still being filled by a load. */
+function queueStillLoading(store: Store): boolean {
+  if (loadBackfill && Date.now() - loadBackfill.at < LOAD_INDEX_TTL_MS) {
+    return true;
+  }
+  loadBackfill = null;
+  const target = store.get(playbackTargetAtom);
+  const q = store.get(sonosQueueAtom);
+  return (
+    target.type === "sonos" &&
+    q?.coordinatorId === target.coordinatorId &&
+    q.backfilling
+  );
 }
 
 /**
@@ -239,30 +281,37 @@ export function createSonosActions(store: Store, showToast: ShowToast) {
     }
   };
 
-  /** Appends to the end of the Sonos queue; what doesn't fit goes to the overflow front. */
+  /** Counts tracks SONE added or removed into `knownLength`. */
+  const adjustKnownLength = (delta: number) => {
+    if (knownLength !== null) knownLength = Math.max(0, knownLength + delta);
+  };
+
+  /**
+   * Appends to the end of the Sonos queue (behind a running back-fill, which
+   * the backend orders); what doesn't fit goes to the overflow front.
+   */
   const appendToSonos = (tracks: Track[]) =>
-    editQueue(false, async (index) => {
-      // The polled queue is exact once our own edits have shown up in it;
-      // until then the (optimistically updated) mirror is the better guess.
+    editQueue(false, async () => {
+      // The polled queue is exact once it's complete and our own edits have
+      // shown up in it; until then, count from what SONE sent.
       const q = store.get(sonosQueueAtom);
       const target = store.get(playbackTargetAtom);
-      const settled =
-        !loadWindowActive() && Date.now() - lastOwnEditAt >= OWN_EDIT_GRACE_MS;
-      const length =
-        settled &&
-        q &&
-        target.type === "sonos" &&
-        q.coordinatorId === target.coordinatorId
+      const polled =
+        q && target.type === "sonos" && q.coordinatorId === target.coordinatorId
           ? q.items.length
-          : index + 1 + store.get(queueAtom).length;
+          : null;
+      const settled =
+        !loadWindowActive() &&
+        !queueStillLoading(store) &&
+        Date.now() - lastOwnEditAt >= OWN_EDIT_GRACE_MS;
+      const length =
+        settled && polled !== null ? polled : (knownLength ?? polled ?? 0);
       const room = Math.max(0, MAX_TOTAL - length);
       const fit = tracks.slice(0, room);
       if (tracks.length > room) overflow = [...tracks.slice(room), ...overflow];
       if (fit.length === 0) return;
-      await sonosQueueInsert(
-        fit.map((t) => t.id),
-        length,
-      );
+      await sonosQueueAppend(fit.map((t) => t.id));
+      knownLength = length + fit.length;
       overflowAnchor = fit[fit.length - 1].id;
     });
 
@@ -296,6 +345,21 @@ export function createSonosActions(store: Store, showToast: ShowToast) {
     refusesReorder,
 
     /**
+     * True (after toasting) while a load is still filling the Sonos queue:
+     * the mirror is partial then, and replacing the upcoming queue with it
+     * would cut the rest off. The reorder and shuffle guards check this
+     * before touching the atoms.
+     */
+    refusesWhileLoading(): boolean {
+      if (!queueStillLoading(store)) return false;
+      showToast(
+        "Queue is still loading on Sonos — try again in a moment",
+        "info",
+      );
+      return true;
+    },
+
+    /**
      * Replaces the Sonos queue with history/current/manual/queue from the
      * atoms. Resolves true once Sonos has it, false otherwise (nothing to
      * load, locked, or failed after toasting).
@@ -325,13 +389,20 @@ export function createSonosActions(store: Store, showToast: ShowToast) {
       setPending(store, []);
       store.set(consecutiveFailCountAtom, 0);
       try {
-        await ownQueueEdit(() =>
+        const backfilling = await ownQueueEdit(() =>
           sonosLoadQueue(flat.trackIds, flat.startIndex, positionSecs, play),
         );
-        loadIndex = { index: flat.startIndex, at: Date.now() };
+        const now = Date.now();
+        loadIndex = { index: flat.startIndex, at: now };
+        knownLength = flat.trackIds.length;
+        loadBackfill = backfilling
+          ? { at: now, total: flat.trackIds.length }
+          : null;
         return true;
       } catch (error) {
         overflow = [];
+        knownLength = null;
+        loadBackfill = null;
         if (forHandoff) throw error;
         if (safeErrorMessage(error, "") === SONOS_SN_UNKNOWN) {
           console.error("[sonos] load failed:", error);
@@ -404,6 +475,7 @@ export function createSonosActions(store: Store, showToast: ShowToast) {
       const ok = await editQueue(true, (index) =>
         sonosQueueInsert(ids, index + 1),
       );
+      if (ok) adjustKnownLength(ids.length);
       if (!ok) {
         if (store.get(queueAtom) === optimistic) store.set(queueAtom, before);
         setPending(store, []);
@@ -426,6 +498,7 @@ export function createSonosActions(store: Store, showToast: ShowToast) {
       const ok = await editQueue(true, (index) =>
         sonosQueueInsert(ids, playNextInsertIndex(index, offset)),
       );
+      if (ok) adjustKnownLength(ids.length);
       if (!ok) {
         if (store.get(queueAtom) === optimistic) store.set(queueAtom, before);
         setPending(store, []);
@@ -477,6 +550,7 @@ export function createSonosActions(store: Store, showToast: ShowToast) {
       const ok = await editQueue(false, (index) =>
         sonosQueueRemove(queueIndexToSonos(index, queueIndex)),
       );
+      if (ok) adjustKnownLength(-1);
       if (!ok && store.get(queueAtom) === optimistic) {
         store.set(queueAtom, before);
       }
@@ -498,6 +572,9 @@ export function createSonosActions(store: Store, showToast: ShowToast) {
           index,
           fit.map((t) => t.id),
         );
+        if (knownLength !== null) knownLength = index + 1 + fit.length;
+        // The replace cancelled any back-fill (and its queued appends)
+        loadBackfill = null;
         const state = store.get(sonosStateAtom);
         overflowAnchor =
           fit.length > 0

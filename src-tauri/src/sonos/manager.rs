@@ -4,6 +4,7 @@
 //! All shared state sits behind a `std::sync::Mutex` that is never held across
 //! an `.await`; network calls work on values cloned out of it.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -13,7 +14,7 @@ use tauri::{AppHandle, Emitter};
 
 use crate::error::SoneError;
 use crate::sonos::discovery::{discover, fetch_topology};
-use crate::sonos::services::{self, TransportState};
+use crate::sonos::services::{self, PositionInfo, TransportState};
 use crate::sonos::soap::SoapClient;
 use crate::sonos::tidal::{
     build_track_didl, build_track_uri, classify_uri, didl_res_uris, find_tidal_sn,
@@ -111,10 +112,68 @@ pub struct SonosQueue {
     pub coordinator_id: String,
     pub update_id: u32,
     pub items: Vec<QueueItem>,
+    /// A load's back-fill (or appends queued behind it) is still running:
+    /// `items` is partial and will grow.
+    pub backfilling: bool,
 }
 
-/// The group stopped by itself mid-queue (not at the end, not by SONE, not the
-/// TV input): playback was interrupted, e.g. a track became unavailable.
+/// The queue index and current item of a [`PositionInfo`]. `from_queue` is
+/// whether the transport plays from the speaker's queue (see
+/// [`services::is_queue_uri`]): other sources (radio, line-in, Spotify
+/// Connect, AirPlay, TV) report `Track` 1 too, which is not a queue position.
+/// Their item is never treated as TIDAL (it isn't in the queue SONE mirrors).
+pub fn current_from_position(
+    info: &PositionInfo,
+    from_queue: bool,
+    ip: &str,
+) -> (Option<usize>, Option<QueueItem>) {
+    let kind = classify_uri(&info.track_uri);
+    if kind == QueueItemKind::Tv {
+        let tv = QueueItem {
+            kind: QueueItemKind::Tv,
+            tidal_track_id: None,
+            title: "TV".into(),
+            artist: String::new(),
+            album_art_url: None,
+            duration_secs: None,
+        };
+        return (None, Some(tv));
+    }
+    let parsed = if info.track_uri.is_empty() {
+        None
+    } else {
+        parse_didl_items(&info.track_meta, ip).into_iter().next()
+    };
+    if from_queue {
+        // 1-based on Sonos (0 = none).
+        let index = info.track_number.checked_sub(1).map(|i| i as usize);
+        return (index, parsed);
+    }
+    if info.track_uri.is_empty() {
+        return (None, None);
+    }
+    let item = match parsed {
+        Some(item) => QueueItem {
+            kind: QueueItemKind::Other,
+            tidal_track_id: None,
+            ..item
+        },
+        None => QueueItem {
+            kind: QueueItemKind::Other,
+            tidal_track_id: None,
+            title: String::new(),
+            artist: String::new(),
+            album_art_url: None,
+            duration_secs: info.duration_secs,
+        },
+    };
+    (None, Some(item))
+}
+
+/// The group stopped by itself mid-queue (not at the end, not by SONE, not a
+/// non-queue source such as the TV input or radio, before or after):
+/// playback was interrupted, e.g. a track became unavailable. `prev` is the
+/// last state that wasn't Transitioning.
 pub fn detect_unexpected_stop(
     prev: &SonosState,
     next: &SonosState,
@@ -127,7 +186,7 @@ pub fn detect_unexpected_stop(
     {
         return false;
     }
-    matches!(next.track_index, Some(i) if i + 1 < queue_len)
+    prev.track_index.is_some() && matches!(next.track_index, Some(i) if i + 1 < queue_len)
 }
 
 /// A `Playing` observation may clear `user_stopped` only if SONE did not mark
@@ -214,6 +273,25 @@ pub fn fill_should_continue(
     }
 }
 
+/// How many of `wanted` more tracks fit in a queue of `queue_len`.
+pub fn append_room(queue_len: usize, wanted: usize) -> usize {
+    wanted.min(MAX_QUEUE_TRACKS.saturating_sub(queue_len))
+}
+
+/// Takes the next batch of the pending tail for a queue of `queue_len`
+/// tracks: in order, at most [`ADD_BATCH`], and only what fits under
+/// [`MAX_QUEUE_TRACKS`]. Once the queue is full the rest is dropped. Returns
+/// the batch and how many ids were dropped.
+pub fn next_tail_batch(tail: &mut VecDeque<u64>, queue_len: usize) -> (Vec<u64>, usize) {
+    let take = append_room(queue_len, tail.len().min(ADD_BATCH));
+    if take == 0 {
+        let dropped = tail.len();
+        tail.clear();
+        return (Vec::new(), dropped);
+    }
+    (tail.drain(..take).collect(), 0)
+}
+
 /// Frontend indices are 0-based, Sonos queue positions are 1-based. This is
 /// the single place the conversion happens.
 pub fn queue_position(index: usize) -> u32 {
@@ -245,12 +323,26 @@ struct State {
     tidal_sn: Option<u32>,
 }
 
+/// The running back-fill and the appends queued behind it.
+#[derive(Default)]
+struct Backfill {
+    /// Generation of the running back-fill; `None` when none runs. Only the
+    /// one matching `fill_generation` counts.
+    running: Option<u64>,
+    /// Ids `queue_append` received while the back-fill ran; it adds them, in
+    /// order, after its own batches.
+    tail: VecDeque<u64>,
+}
+
 struct Inner {
     soap: SoapClient,
     state: Mutex<State>,
     /// Bumped by every new load/selection (and queue wipes); a running
     /// back-fill whose generation no longer matches stops.
     fill_generation: AtomicU64,
+    /// Leaf lock (nothing else is taken while it is held). `fill_generation`
+    /// is only bumped under it, so a pending tail never outlives its load.
+    backfill: Mutex<Backfill>,
     /// Serializes queue mutations. Foreground ops (load, insert, remove,
     /// replace, clear, play_index) hold it for their whole duration; the
     /// back-fill holds it for its entire prepend phase and per batch while
@@ -322,6 +414,7 @@ impl SonosManager {
                 soap: SoapClient::new(),
                 state: Mutex::new(state),
                 fill_generation: AtomicU64::new(0),
+                backfill: Mutex::new(Backfill::default()),
                 queue_lock: Arc::new(tokio::sync::Mutex::new(())),
                 own_update_id: Mutex::new(None),
                 position: Mutex::new(None),
@@ -352,17 +445,44 @@ impl SonosManager {
         lock(&self.inner.state).tidal_sn
     }
 
-    pub fn manual_ip(&self) -> Option<String> {
-        lock(&self.inner.state).manual_ip.clone()
-    }
-
     fn mark_user_stopped(&self) {
         self.inner.stop_epoch.fetch_add(1, Ordering::SeqCst);
         self.inner.user_stopped.store(true, Ordering::SeqCst);
     }
 
+    /// New generation: cancels a running back-fill's remaining batches and
+    /// discards the appends queued behind it.
     fn bump_generation(&self) -> u64 {
+        let mut b = lock(&self.inner.backfill);
+        b.tail.clear();
         self.inner.fill_generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Whether the current generation's back-fill (or its pending tail) is
+    /// still adding tracks.
+    pub fn backfilling(&self) -> bool {
+        let b = lock(&self.inner.backfill);
+        b.running == Some(self.inner.fill_generation.load(Ordering::SeqCst))
+    }
+
+    /// Queues `ids` behind the running back-fill of the current generation;
+    /// false (nothing queued) when none runs.
+    fn push_tail_if_backfilling(&self, ids: &[u64]) -> bool {
+        let mut b = lock(&self.inner.backfill);
+        if b.running != Some(self.inner.fill_generation.load(Ordering::SeqCst)) {
+            return false;
+        }
+        b.tail.extend(ids.iter().copied());
+        true
+    }
+
+    /// The back-fill of `generation` is over (no-op if a newer one took over).
+    fn finish_backfill(&self, generation: u64) {
+        let mut b = lock(&self.inner.backfill);
+        if b.running == Some(generation) {
+            b.running = None;
+            b.tail.clear();
+        }
     }
 
     fn set_own_update_id(&self, id: Option<u32>) {
@@ -608,13 +728,15 @@ impl SonosManager {
     /// The queue lock is held from `remove_all` through `play` and then handed
     /// to the back-fill task, so nothing can run between the foreground part
     /// and the start of the prepend phase.
+    ///
+    /// Returns whether a back-fill continues in the background.
     pub async fn load_queue(
         &self,
         track_ids: &[u64],
         start_index: usize,
         position_secs: f64,
         play: bool,
-    ) -> Result<(), SoneError> {
+    ) -> Result<bool, SoneError> {
         let (coordinator_id, ip) = self.selected_coordinator()?;
         if track_ids.is_empty() {
             return Err(SoneError::Sonos("No tracks to load".into()));
@@ -625,10 +747,19 @@ impl SonosManager {
         let generation = self.bump_generation();
         let guard = Arc::clone(&self.inner.queue_lock).lock_owned().await;
         let plan = plan_load(track_ids, start_index);
+        let needs_fill = !plan.append.is_empty() || !plan.prepend.is_empty();
+        if needs_fill {
+            // Before the first queue write: every queue the poller reads from
+            // now on reports `backfilling`, and appends queue up behind it.
+            lock(&self.inner.backfill).running = Some(generation);
+        }
         let soap = &self.inner.soap;
         self.mark_user_stopped();
 
-        services::remove_all(soap, &ip).await?;
+        if let Err(e) = services::remove_all(soap, &ip).await {
+            self.finish_backfill(generation);
+            return Err(e);
+        }
         // From here on a failure leaves the speaker's queue empty/partial.
         let foreground = async {
             self.set_own_update_id(None);
@@ -653,26 +784,30 @@ impl SonosManager {
             Ok::<(), SoneError>(())
         };
         if let Err(e) = foreground.await {
+            self.finish_backfill(generation);
             log::warn!(
                 "[sonos] load_queue failed after clearing the queue; queue left empty/partial: {e}"
             );
             return Err(e);
         }
 
-        if !plan.append.is_empty() || !plan.prepend.is_empty() {
+        if needs_fill {
             let this = self.clone();
             // The owned guard moves into the task: no gap in which another
             // queue op could run before the prepend phase starts.
             tauri::async_runtime::spawn(async move {
                 this.run_backfill(guard, ip, sn, generation, plan).await;
+                this.finish_backfill(generation);
             });
         }
-        Ok(())
+        Ok(needs_fill)
     }
 
-    async fn fill_ok(&self, ip: &str, generation: u64) -> bool {
+    /// The queue's current length if the back-fill of `generation` may add
+    /// its next batch (see [`fill_should_continue`]); `None` if it must stop.
+    async fn fill_check(&self, ip: &str, generation: u64) -> Option<usize> {
         if generation != self.inner.fill_generation.load(Ordering::SeqCst) {
-            return false;
+            return None;
         }
         match services::browse(&self.inner.soap, ip, "Q:0", 0, 1).await {
             Ok(b) => fill_should_continue(
@@ -680,20 +815,22 @@ impl SonosManager {
                 b.update_id,
                 generation,
                 self.inner.fill_generation.load(Ordering::SeqCst),
-            ),
+            )
+            .then_some(b.total_matches as usize),
             Err(e) => {
                 log::warn!("[sonos] back-fill stopped, cannot read queue: {e}");
-                false
+                None
             }
         }
     }
 
     /// Back-fill order: earlier tracks first (inserted before the playing
-    /// start track), then the tail. `prepend_guard` (the queue lock handed
-    /// over by `load_queue`) is held for the whole prepend phase, so
-    /// foreground index ops never see a half-inserted prepend and a
-    /// generation bump can only cancel the remaining append batches. The
-    /// append phase takes the lock per batch.
+    /// start track), then the tail, then whatever `queue_append` queued up
+    /// meanwhile. `prepend_guard` (the queue lock handed over by
+    /// `load_queue`) is held for the whole prepend phase, so foreground index
+    /// ops never see a half-inserted prepend and a generation bump can only
+    /// cancel the remaining append batches. The append phases take the lock
+    /// per batch. The caller marks the back-fill finished afterwards.
     async fn run_backfill(
         &self,
         prepend_guard: tokio::sync::OwnedMutexGuard<()>,
@@ -704,7 +841,7 @@ impl SonosManager {
     ) {
         let mut at = 1u32;
         for chunk in plan.prepend.chunks(ADD_BATCH) {
-            if !self.fill_ok(&ip, generation).await {
+            if self.fill_check(&ip, generation).await.is_none() {
                 return;
             }
             if let Err(e) = self.add_tracks(&ip, sn, chunk, at).await {
@@ -717,7 +854,7 @@ impl SonosManager {
 
         for chunk in plan.append.chunks(ADD_BATCH) {
             let _guard = self.inner.queue_lock.lock().await;
-            if !self.fill_ok(&ip, generation).await {
+            if self.fill_check(&ip, generation).await.is_none() {
                 return;
             }
             if let Err(e) = self.add_tracks(&ip, sn, chunk, 0).await {
@@ -725,6 +862,69 @@ impl SonosManager {
                 return;
             }
         }
+
+        // The pending tail. Whether it is empty is decided under the
+        // backfill lock, together with clearing `running`, so an append
+        // either lands in the tail before that or goes the direct way after.
+        loop {
+            let _guard = self.inner.queue_lock.lock().await;
+            let Some(queue_len) = self.fill_check(&ip, generation).await else {
+                return;
+            };
+            let batch = {
+                let mut b = lock(&self.inner.backfill);
+                if b.running != Some(generation) {
+                    return;
+                }
+                let (batch, dropped) = next_tail_batch(&mut b.tail, queue_len);
+                if dropped > 0 {
+                    log::info!(
+                        "[sonos] queue full ({MAX_QUEUE_TRACKS}): dropped {dropped} appended tracks"
+                    );
+                }
+                if batch.is_empty() {
+                    b.running = None;
+                    return;
+                }
+                batch
+            };
+            if let Err(e) = self.add_tracks(&ip, sn, &batch, 0).await {
+                log::warn!("[sonos] back-fill tail append failed: {e}");
+                return;
+            }
+        }
+    }
+
+    /// Appends `ids` at the end of the queue. While the current load's
+    /// back-fill runs they queue up behind it (it adds them in order once
+    /// its own tracks are in); otherwise they go in right away. Whatever
+    /// exceeds the queue cap is dropped.
+    pub async fn queue_append(&self, ids: &[u64]) -> Result<(), SoneError> {
+        let (_, ip) = self.selected_coordinator()?;
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let sn = self.ensure_sn(&ip).await?;
+        // Checked before the lock too: the prepend phase holds it for long.
+        if self.push_tail_if_backfilling(ids) {
+            return Ok(());
+        }
+        let _guard = self.inner.queue_lock.lock().await;
+        // A load may have started while we waited.
+        if self.push_tail_if_backfilling(ids) {
+            return Ok(());
+        }
+        let queue_len = services::browse(&self.inner.soap, &ip, "Q:0", 0, 1)
+            .await?
+            .total_matches as usize;
+        let fit = append_room(queue_len, ids.len());
+        if fit < ids.len() {
+            log::info!(
+                "[sonos] queue full ({MAX_QUEUE_TRACKS}): dropped {} appended tracks",
+                ids.len() - fit
+            );
+        }
+        self.add_tracks(&ip, sn, &ids[..fit], 0).await
     }
 
     /// Inserts `ids` before 0-based queue index `at`.
@@ -810,17 +1010,35 @@ impl SonosManager {
 
     /// One poll of the coordinator. Transport state and position are the
     /// liveness probe (their failure is an error); the rest falls back to the
-    /// previous values.
+    /// previous values. `media` caches (track URI, plays from the queue):
+    /// `GetMediaInfo` is only asked again when the track URI changes.
     async fn read_state(
         &self,
         coordinator_id: &str,
         ip: &str,
         members: &[(String, String)],
         prev: Option<&SonosState>,
+        media: &mut Option<(String, bool)>,
     ) -> Result<SonosState, SoneError> {
         let soap = &self.inner.soap;
         let transport_state = services::transport_state(soap, ip).await?;
         let info = services::position_info(soap, ip).await?;
+        let from_queue = match media.as_ref() {
+            Some((uri, from_queue)) if *uri == info.track_uri => *from_queue,
+            _ => match services::media_info(soap, ip).await {
+                Ok(current_uri) => {
+                    let from_queue = services::is_queue_uri(&current_uri);
+                    *media = Some((info.track_uri.clone(), from_queue));
+                    from_queue
+                }
+                Err(e) => {
+                    // Not cached, so the next poll asks again; assume the queue
+                    // meanwhile (the behaviour before GetMediaInfo was used).
+                    log::debug!("[sonos] media info failed: {e}");
+                    true
+                }
+            },
+        };
         let (vol, mute, mode) = tokio::join!(
             services::get_group_volume(soap, ip),
             services::get_group_mute(soap, ip),
@@ -843,26 +1061,7 @@ impl SonosManager {
         }
 
         let is_tv = classify_uri(&info.track_uri) == QueueItemKind::Tv;
-        let current_item = if is_tv {
-            Some(QueueItem {
-                kind: QueueItemKind::Tv,
-                tidal_track_id: None,
-                title: "TV".into(),
-                artist: String::new(),
-                album_art_url: None,
-                duration_secs: None,
-            })
-        } else if info.track_uri.is_empty() {
-            None
-        } else {
-            parse_didl_items(&info.track_meta, ip).into_iter().next()
-        };
-        // 1-based on Sonos (0 = none); the TV input is not a queue position.
-        let track_index = if is_tv || info.track_number == 0 {
-            None
-        } else {
-            Some(info.track_number as usize - 1)
-        };
+        let (track_index, current_item) = current_from_position(&info, from_queue, ip);
         Ok(SonosState {
             coordinator_id: coordinator_id.to_string(),
             transport_state,
@@ -909,8 +1108,14 @@ impl SonosManager {
         let mut tracker = ReachTracker::default();
         let mut prev: Option<SonosState> = None;
         let mut last_emit = Instant::now();
+        // Last state that wasn't Transitioning: an unexpected stop is judged
+        // against it, so Playing → Transitioning → Stopped still counts.
+        let mut settled: Option<SonosState> = None;
+        let mut media: Option<(String, bool)> = None;
         let mut queue_update_id: Option<u32> = None;
         let mut queue_len = 0usize;
+        // Last emitted queue, re-sent when only `backfilling` changes.
+        let mut last_queue: Option<SonosQueue> = None;
         loop {
             interval.tick().await;
             let now = Instant::now();
@@ -920,7 +1125,7 @@ impl SonosManager {
             let read = match self.poll_target(&coordinator_id) {
                 None => Err(SoneError::Sonos("group not in topology".into())),
                 Some((ip, members)) => self
-                    .read_state(&coordinator_id, &ip, &members, prev.as_ref())
+                    .read_state(&coordinator_id, &ip, &members, prev.as_ref(), &mut media)
                     .await
                     .map(|s| (s, ip)),
             };
@@ -976,19 +1181,29 @@ impl SonosManager {
                         Ok((update_id, items)) => {
                             queue_len = items.len();
                             queue_update_id = Some(update_id);
-                            let _ = app.emit(
-                                "sonos-queue",
-                                &SonosQueue {
-                                    coordinator_id: coordinator_id.clone(),
-                                    update_id,
-                                    items,
-                                },
-                            );
+                            let q = SonosQueue {
+                                coordinator_id: coordinator_id.clone(),
+                                update_id,
+                                items,
+                                backfilling: self.backfilling(),
+                            };
+                            let _ = app.emit("sonos-queue", &q);
+                            last_queue = Some(q);
                         }
                         Err(e) => log::debug!("[sonos] queue read failed: {e}"),
                     }
                 }
-                Ok(_) => {}
+                Ok(_) => {
+                    // Same queue, but the back-fill may have just finished
+                    // (or started) without a write of its own.
+                    if let Some(q) = last_queue.as_mut() {
+                        let backfilling = self.backfilling();
+                        if q.backfilling != backfilling {
+                            q.backfilling = backfilling;
+                            let _ = app.emit("sonos-queue", &*q);
+                        }
+                    }
+                }
                 Err(e) => log::debug!("[sonos] queue probe failed: {e}"),
             }
 
@@ -1002,7 +1217,7 @@ impl SonosManager {
                 ) {
                     self.inner.user_stopped.store(false, Ordering::SeqCst);
                 }
-            } else if let Some(p) = &prev {
+            } else if let Some(p) = &settled {
                 let user_stopped = self.inner.user_stopped.load(Ordering::SeqCst);
                 if detect_unexpected_stop(p, &state, queue_len, user_stopped) {
                     let _ = app.emit(
@@ -1015,6 +1230,9 @@ impl SonosManager {
             if state_needs_emit(prev.as_ref(), &state, now.duration_since(last_emit)) {
                 let _ = app.emit("sonos-state", &state);
                 last_emit = now;
+            }
+            if state.transport_state != TransportState::Transitioning {
+                settled = Some(state.clone());
             }
             prev = Some(state);
         }
@@ -1204,6 +1422,105 @@ mod tests {
         let prev = st(TransportState::Playing, None);
         let next = st(TransportState::Stopped, None);
         assert!(!detect_unexpected_stop(&prev, &next, 10, false));
+    }
+
+    #[test]
+    fn stop_after_switching_from_a_non_queue_source_is_not_unexpected() {
+        let prev = st(TransportState::Playing, None);
+        let next = st(TransportState::Stopped, Some(2));
+        assert!(!detect_unexpected_stop(&prev, &next, 10, false));
+    }
+
+    #[test]
+    fn tail_batches_drain_in_order_up_to_16() {
+        let mut tail: VecDeque<u64> = (1..=40).collect();
+        let (b, dropped) = next_tail_batch(&mut tail, 100);
+        assert_eq!(b, (1..=16).collect::<Vec<_>>());
+        assert_eq!(dropped, 0);
+        let (b, _) = next_tail_batch(&mut tail, 116);
+        assert_eq!(b, (17..=32).collect::<Vec<_>>());
+        let (b, _) = next_tail_batch(&mut tail, 132);
+        assert_eq!(b, (33..=40).collect::<Vec<_>>());
+        let (b, dropped) = next_tail_batch(&mut tail, 140);
+        assert!(b.is_empty());
+        assert_eq!(dropped, 0);
+    }
+
+    #[test]
+    fn tail_batches_respect_the_1000_cap() {
+        let mut tail: VecDeque<u64> = (1..=20).collect();
+        // Room for 5: they go in, the rest is dropped on the next call.
+        let (b, dropped) = next_tail_batch(&mut tail, 995);
+        assert_eq!(b, vec![1, 2, 3, 4, 5]);
+        assert_eq!(dropped, 0);
+        let (b, dropped) = next_tail_batch(&mut tail, 1000);
+        assert!(b.is_empty());
+        assert_eq!(dropped, 15);
+        assert!(tail.is_empty());
+        // Over-full (foreign edits) behaves like full.
+        let mut tail: VecDeque<u64> = VecDeque::from(vec![7]);
+        assert_eq!(next_tail_batch(&mut tail, 1200), (Vec::new(), 1));
+    }
+
+    #[test]
+    fn append_room_caps_at_1000() {
+        assert_eq!(append_room(0, 30), 30);
+        assert_eq!(append_room(990, 30), 10);
+        assert_eq!(append_room(1000, 30), 0);
+        assert_eq!(append_room(1500, 30), 0);
+    }
+
+    fn tidal_position() -> PositionInfo {
+        let m = crate::sonos::soap::parse_response(
+            include_str!("fixtures/position_info_tidal.xml"),
+            "GetPositionInfo",
+        )
+        .unwrap();
+        services::parse_position_info(&m)
+    }
+
+    #[test]
+    fn queue_source_maps_track_number_to_index() {
+        let (index, item) = current_from_position(&tidal_position(), true, "192.0.2.34");
+        assert_eq!(index, Some(4));
+        let item = item.unwrap();
+        assert_eq!(item.kind, QueueItemKind::Tidal);
+        assert_eq!(item.tidal_track_id, Some(57770232));
+    }
+
+    #[test]
+    fn non_queue_source_has_no_index_and_is_not_tidal() {
+        let mut info = tidal_position();
+        info.track_number = 1;
+        let (index, item) = current_from_position(&info, false, "192.0.2.34");
+        assert_eq!(index, None);
+        let item = item.unwrap();
+        assert_eq!(item.kind, QueueItemKind::Other);
+        assert_eq!(item.tidal_track_id, None);
+
+        // A stream without metadata still reports something to show.
+        info.track_uri = "x-sonosapi-stream:s24896?sid=254".into();
+        info.track_meta = String::new();
+        let (index, item) = current_from_position(&info, false, "192.0.2.34");
+        assert_eq!(index, None);
+        assert_eq!(item.unwrap().kind, QueueItemKind::Other);
+    }
+
+    #[test]
+    fn tv_input_stays_tv() {
+        let m = crate::sonos::soap::parse_response(
+            include_str!("fixtures/position_info_tv.xml"),
+            "GetPositionInfo",
+        )
+        .unwrap();
+        let info = services::parse_position_info(&m);
+        for from_queue in [false, true] {
+            let (index, item) = current_from_position(&info, from_queue, "192.0.2.214");
+            assert_eq!(index, None);
+            let item = item.unwrap();
+            assert_eq!(item.kind, QueueItemKind::Tv);
+            assert_eq!(item.title, "TV");
+        }
     }
 
     #[test]

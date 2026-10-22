@@ -79,7 +79,7 @@ pub async fn sonos_load_queue(
     start_index: usize,
     position_secs: f64,
     play: bool,
-) -> Result<(), SoneError> {
+) -> Result<bool, SoneError> {
     log::debug!(
         "[sonos_load_queue]: tracks={}, start_index={}, position_secs={:.1}, play={}",
         track_ids.len(),
@@ -137,6 +137,19 @@ pub async fn sonos_queue_insert(
     let result = state.sonos.queue_insert(&track_ids, at).await;
     if let Err(e) = persist_sn(&state) {
         log::warn!("[sonos_queue_insert] failed to persist sn: {e}");
+    }
+    result
+}
+
+/// Appends at the end; while a load's back-fill runs, behind it (in order).
+#[tauri::command(rename_all = "camelCase")]
+pub async fn sonos_queue_append(
+    state: State<'_, AppState>,
+    track_ids: Vec<u64>,
+) -> Result<(), SoneError> {
+    let result = state.sonos.queue_append(&track_ids).await;
+    if let Err(e) = persist_sn(&state) {
+        log::warn!("[sonos_queue_append] failed to persist sn: {e}");
     }
     result
 }

@@ -185,6 +185,13 @@ function useSwitchTarget() {
         }
         await sonosSelectGroup(coordinatorId, false);
         if (!loadable) {
+          if (!fromGroup && snap.wasPlaying) {
+            // Whatever plays here (e.g. an unavailable track) must not go on
+            // under the group
+            await invoke("stop_track").catch(warn("stop_track"));
+            store.set(isPlayingAtom, false);
+            store.set(streamInfoAtom, null);
+          }
           // Nothing to send: just follow what the group plays
           enterMirrorMode(store, coordinatorId, name);
           return;
@@ -393,7 +400,11 @@ export function useSonosAutoAttach() {
       const state = store.get(sonosStateAtom);
       if (target.type !== "sonos") return;
       const fromTarget = state?.coordinatorId === target.coordinatorId;
-      if (fromTarget) stopWatchdog();
+      if (fromTarget) {
+        stopWatchdog();
+        // The group answers after all: a watchdog that ran out is moot
+        if (state.reachability !== "lost") silent = null;
+      }
       if (store.get(sonosHandoffAtom)) return;
       const lost =
         fromTarget && state.reachability === "lost" && state !== handled;

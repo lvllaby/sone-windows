@@ -1,5 +1,7 @@
 //! Sonos zone group topology: parses `GetZoneGroupState` into groups of rooms.
 
+use std::net::Ipv4Addr;
+
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 use serde::Serialize;
@@ -57,11 +59,13 @@ fn attr<'a>(list: &'a [(String, String)], key: &str) -> Option<&'a str> {
 }
 
 /// `http://192.0.2.34:1400/xml/device_description.xml` -> `192.0.2.34`.
+/// Only IPv4 hosts are accepted (as in SSDP discovery): the value ends up in
+/// SOAP URLs, so a hostname or anything else is rejected.
 fn ip_from_location(location: &str) -> Option<String> {
     let rest = location.split("://").nth(1)?;
     let host = rest.split('/').next()?;
     let ip = host.split(':').next()?;
-    (!ip.is_empty()).then(|| ip.to_string())
+    ip.parse::<Ipv4Addr>().ok().map(|_| ip.to_string())
 }
 
 fn finish(p: PendingGroup) -> Option<SonosGroup> {
@@ -230,6 +234,31 @@ mod tests {
             .iter()
             .flat_map(|g| &g.members)
             .any(|m| m.room_name == "Kök & Bad"));
+    }
+
+    #[test]
+    fn ip_from_location_requires_ipv4() {
+        assert_eq!(
+            ip_from_location("http://192.0.2.34:1400/xml/device_description.xml").as_deref(),
+            Some("192.0.2.34")
+        );
+        assert_eq!(
+            ip_from_location("http://192.0.2.34/x").as_deref(),
+            Some("192.0.2.34")
+        );
+        assert_eq!(ip_from_location("http://evil.example:1400/x"), None);
+        assert_eq!(ip_from_location("http://192.0.2.999:1400/x"), None);
+        assert_eq!(ip_from_location("http://[2001:db8::1]:1400/x"), None);
+        assert_eq!(ip_from_location("http://:1400/x"), None);
+        assert_eq!(ip_from_location("192.0.2.34"), None);
+    }
+
+    #[test]
+    fn topology_drops_members_with_non_ipv4_location() {
+        let xml = TWO_ROOMS.replace("http://192.0.2.2:1400", "http://other.example:1400");
+        let groups = parse_zone_group_state(&xml).unwrap();
+        assert_eq!(groups[0].members.len(), 1);
+        assert_eq!(groups[0].members[0].id, "RINCON_C");
     }
 
     #[test]
