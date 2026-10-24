@@ -8,7 +8,7 @@
  * (play, pause, queue, etc.) but don't need to read playback state.
  */
 
-import { useCallback, useRef } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import { useStore } from "jotai";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -29,7 +29,10 @@ import {
   allowExplicitAtom,
   bitPerfectAtom,
   consecutiveFailCountAtom,
+  pendingResumePositionAtom,
+  preMuteVolumeAtom,
 } from "../atoms/playback";
+import { sonosGroupVolumeAtom, sonosStateAtom } from "../atoms/sonos";
 import { getMixItems, checkNetworkError } from "../api/tidal";
 import { useToast } from "../contexts/ToastContext";
 import { stampQid, stampQids, ensureQid } from "../lib/qid";
@@ -39,12 +42,30 @@ import type { Track, StreamInfo, ManualTrackSource, QueuedTrack } from "../types
 import { getTidalImageUrl } from "../types";
 import { preloadImage } from "../components/TidalImage";
 import { getTrackArtistDisplay } from "../utils/itemHelpers";
+import { createSonosActions } from "./sonosActions";
 
 type PlayResult =
   | { ok: true }
   | { ok: false; reason: "network" | "unplayable" | "transient" };
 
-const MAX_CONSECUTIVE_PLAY_FAILS = 3;
+export const MAX_CONSECUTIVE_PLAY_FAILS = 3;
+
+/** Tells the scrobbler a track started playing (local playback and Sonos casts). */
+export function notifyTrackStarted(track: Track, chosenByUser: boolean) {
+  invoke("notify_track_started", {
+    payload: {
+      artist: getTrackArtistDisplay(track),
+      title: track.title,
+      album: track.album?.title || null,
+      albumArtist: null,
+      durationSecs: track.duration || 0,
+      trackNumber: track.trackNumber || null,
+      chosenByUser,
+      isrc: track.isrc || null,
+      trackId: track.id || null,
+    },
+  }).catch(() => {});
+}
 
 /** Normalize a raw track-like object into a proper Track.
  *  Handles the artist/artists mismatch from different API endpoints. */
@@ -95,6 +116,39 @@ function fisherYatesShuffle<T>(arr: T[]): T[] {
   return a;
 }
 
+type Store = ReturnType<typeof useStore>;
+
+const SEEK_RETRY_DELAY = 150;
+const SEEK_MAX_RETRIES = 10;
+
+/** Bumped by local seeks and pauses: a pending seekAfterStart stops retrying. */
+let seekAfterStartGen = 0;
+
+/** Seeks a local track that was just started. The pipeline may not take a
+ *  seek until it has prerolled, so failed attempts are retried for ~1.5 s;
+ *  gives up once the user seeks or pauses, or the current track changes. */
+export async function seekAfterStart(store: Store, positionSecs: number) {
+  const gen = ++seekAfterStartGen;
+  const track = store.get(currentTrackAtom);
+  const stale = () =>
+    gen !== seekAfterStartGen || store.get(currentTrackAtom) !== track;
+  for (let attempt = 0; ; attempt++) {
+    if (stale()) return;
+    try {
+      await invoke("seek_track", { positionSecs });
+      if (!stale()) notifySeek(positionSecs);
+      return;
+    } catch (error) {
+      if (stale()) return;
+      if (attempt >= SEEK_MAX_RETRIES) {
+        console.error("Failed to seek after start:", error);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, SEEK_RETRY_DELAY));
+    }
+  }
+}
+
 const DEVICE_RETRY_DELAY = 500;
 const DEVICE_MAX_RETRIES = 10;
 const MAX_HISTORY_TRACKS = 500;
@@ -129,6 +183,10 @@ async function invokePlayWithRetry(
 export function usePlaybackActions() {
   const store = useStore();
   const { showToast } = useToast();
+  const sonos = useMemo(
+    () => createSonosActions(store, showToast),
+    [store, showToast],
+  );
 
   const playGenerationRef = useRef(0);
   const autoplayIdsRef = useRef(new Set<number>());
@@ -177,6 +235,16 @@ export function usePlaybackActions() {
       (stamped as any)._playingFrom = store.get(playbackSourceAtom);
       (stamped as any)._contextFrom = store.get(contextSourceAtom);
       store.set(currentTrackAtom, stamped);
+      // Casting: Sonos plays it; useSonosSync scrobbles from the mirrored state
+      if (sonos.isCasting()) {
+        if (await sonos.loadFromAtoms(true)) return { ok: true };
+        // Load failed (already toasted): roll back like the local path
+        store.set(currentTrackAtom, previousTrack);
+        store.set(historyAtom, previousHistory);
+        return { ok: false, reason: "transient" };
+      }
+      // A fresh pipeline: a resume point from a Sonos handoff no longer applies
+      store.set(pendingResumePositionAtom, null);
 
       try {
         const info = await invokePlayWithRetry(
@@ -196,19 +264,7 @@ export function usePlaybackActions() {
         store.set(consecutiveFailCountAtom, 0);
 
         // Notify backend for scrobbling
-        invoke("notify_track_started", {
-          payload: {
-            artist: getTrackArtistDisplay(stamped),
-            title: stamped.title,
-            album: stamped.album?.title || null,
-            albumArtist: null,
-            durationSecs: stamped.duration || 0,
-            trackNumber: stamped.trackNumber || null,
-            chosenByUser: opts?.chosenByUser ?? true,
-            isrc: stamped.isrc || null,
-            trackId: stamped.id || null,
-          },
-        }).catch(() => {});
+        notifyTrackStarted(stamped, opts?.chosenByUser ?? true);
         return { ok: true };
       } catch (error: any) {
         if (generation !== playGenerationRef.current) {
@@ -237,19 +293,22 @@ export function usePlaybackActions() {
         return { ok: false, reason: "transient" };
       }
     },
-    [store, showToast],
+    [store, showToast, sonos],
   );
 
   const pauseTrack = useCallback(async () => {
+    if (sonos.isCasting()) return sonos.pause();
+    seekAfterStartGen++;
     try {
       await invoke("pause_track");
       store.set(isPlayingAtom, false);
     } catch (error) {
       console.error("Failed to pause track:", error);
     }
-  }, [store]);
+  }, [store, sonos]);
 
   const resumeTrack = useCallback(async () => {
+    if (sonos.isCasting()) return sonos.resume();
     try {
       const track = store.get(currentTrackAtom);
       if (!track) return;
@@ -280,8 +339,16 @@ export function usePlaybackActions() {
             trackId: track.id || null,
           },
         }).catch(() => {});
+
+        // Picking up where a Sonos group left off (useSonosHandoff)
+        const resumeAt = store.get(pendingResumePositionAtom);
+        if (resumeAt !== null) {
+          store.set(pendingResumePositionAtom, null);
+          void seekAfterStart(store, resumeAt);
+        }
       } else {
         await invoke("resume_track");
+        store.set(pendingResumePositionAtom, null);
       }
       store.set(isPlayingAtom, true);
     } catch (error) {
@@ -299,10 +366,11 @@ export function usePlaybackActions() {
         );
       }
     }
-  }, [store, showToast]);
+  }, [store, showToast, sonos]);
 
   const setVolume = useCallback(
     async (level: number) => {
+      if (sonos.isCasting()) return sonos.setVolume(level);
       if (store.get(bitPerfectAtom)) return;
       store.set(volumeAtom, level);
       try {
@@ -311,26 +379,70 @@ export function usePlaybackActions() {
         console.error("Failed to set volume:", error);
       }
     },
-    [store],
+    [store, sonos],
   );
 
+  /** Mutes/unmutes the Sonos group; local mute is a volume change (setVolume). */
+  const setMuted = useCallback(
+    async (muted: boolean) => {
+      if (sonos.isCasting()) return sonos.setMuted(muted);
+    },
+    [sonos],
+  );
+
+  /** Volume up/down by `delta` (0-1): the group volume while casting, else the local one. */
+  const adjustVolume = useCallback(
+    (delta: number) => {
+      const from = sonos.isCasting()
+        ? store.get(sonosGroupVolumeAtom)
+        : store.get(volumeAtom);
+      return setVolume(Math.max(0, Math.min(1, from + delta)));
+    },
+    [store, sonos, setVolume],
+  );
+
+  /** Mute toggle: the group's mute while casting; locally volume 0 and back. */
+  const toggleMute = useCallback(() => {
+    if (sonos.isCasting()) {
+      return sonos.setMuted(!(store.get(sonosStateAtom)?.muted ?? false));
+    }
+    const vol = store.get(volumeAtom);
+    if (vol > 0) {
+      store.set(preMuteVolumeAtom, vol);
+      return setVolume(0);
+    }
+    return setVolume(store.get(preMuteVolumeAtom) || 0.5);
+  }, [store, sonos, setVolume]);
+
   const seekTo = useCallback(async (positionSecs: number) => {
+    if (sonos.isCasting()) return sonos.seek(positionSecs);
+    seekAfterStartGen++;
+    if (store.get(pendingResumePositionAtom) !== null) {
+      // Stopped after a Sonos handoff: no pipeline yet, move the resume point
+      store.set(pendingResumePositionAtom, positionSecs);
+      notifySeek(positionSecs);
+      return;
+    }
     try {
       await invoke("seek_track", { positionSecs });
       notifySeek(positionSecs);
     } catch (error) {
       console.error("Failed to seek:", error);
     }
-  }, []);
+  }, [store, sonos]);
 
   const addToQueue = useCallback(
     (track: Track, source?: ManualTrackSource) => {
       if (!store.get(allowExplicitAtom) && track.explicit) return;
       const stamped = stampQid(normalizeTrack(track));
       if (source) (stamped as QueuedTrack)._source = source;
+      if (sonos.isCasting()) {
+        void sonos.insertAfterPending([stamped]);
+        return;
+      }
       store.set(manualQueueAtom, [...store.get(manualQueueAtom), stamped]);
     },
-    [store],
+    [store, sonos],
   );
 
   const playNextInQueue = useCallback(
@@ -338,9 +450,13 @@ export function usePlaybackActions() {
       if (!store.get(allowExplicitAtom) && track.explicit) return;
       const stamped = stampQid(normalizeTrack(track));
       if (source) (stamped as QueuedTrack)._source = source;
+      if (sonos.isCasting()) {
+        void sonos.insertNext([stamped]);
+        return;
+      }
       store.set(manualQueueAtom, [stamped, ...store.get(manualQueueAtom)]);
     },
-    [store],
+    [store, sonos],
   );
 
   const setQueueTracks = useCallback(
@@ -362,11 +478,18 @@ export function usePlaybackActions() {
       },
     ) => {
       if (options?.reorder) {
+        if (
+          sonos.isCasting() &&
+          (sonos.refusesWhileLoading() || sonos.refusesReorder())
+        ) {
+          return;
+        }
         // Drag-and-drop reorder: preserve existing _qids, split back into manual/context
         const mc = options.manualCount ?? 0;
         const stamped = tracks.map((t) => ensureQid(normalizeTrack(t)));
         store.set(manualQueueAtom, stamped.slice(0, mc));
         store.set(queueAtom, stamped.slice(mc));
+        if (sonos.isCasting()) void sonos.replaceUpcoming(stamped);
         return;
       }
       const filterExplicit = !store.get(allowExplicitAtom);
@@ -391,7 +514,7 @@ export function usePlaybackActions() {
       );
       store.set(queueAtom, stampQids(eligible.map(normalizeTrack)));
     },
-    [store],
+    [store, sonos],
   );
 
   const appendToQueue = useCallback(
@@ -399,6 +522,10 @@ export function usePlaybackActions() {
       const filterExplicit = !store.get(allowExplicitAtom);
       const eligible = filterExplicit ? newTracks.filter(t => !t.explicit) : newTracks;
       if (eligible.length === 0) return;
+      if (sonos.isCasting()) {
+        void sonos.appendEnd(eligible.map(normalizeTrack));
+        return;
+      }
       const stamped = stampQids(eligible.map(normalizeTrack));
 
       // Append to playbackSourceAtom.tracks
@@ -428,11 +555,15 @@ export function usePlaybackActions() {
         store.set(queueAtom, [...store.get(queueAtom), ...stamped]);
       }
     },
-    [store],
+    [store, sonos],
   );
 
   const removeFromQueue = useCallback(
     (index: number) => {
+      if (sonos.isCasting()) {
+        void sonos.removeAt(index);
+        return;
+      }
       const manual = store.get(manualQueueAtom);
       if (index < manual.length) {
         // Remove from manual queue
@@ -461,11 +592,12 @@ export function usePlaybackActions() {
         }
       }
     },
-    [store],
+    [store, sonos],
   );
 
   const playNext = useCallback(
     async (options?: { explicit?: boolean }) => {
+      if (sonos.isCasting()) return sonos.next();
       if (playNextLockRef.current) return;
       playNextLockRef.current = true;
       try {
@@ -743,10 +875,14 @@ export function usePlaybackActions() {
         playNextLockRef.current = false;
       }
     },
-    [store, playTrack],
+    [store, playTrack, sonos],
   );
 
   const playPrevious = useCallback(async () => {
+    // Casting: the same restart-past-3-s rule, against the polled position
+    if (sonos.isCasting()) {
+      return getInterpolatedPosition() > 3 ? sonos.seek(0) : sonos.previous();
+    }
     if (playNextLockRef.current) return;
     playNextLockRef.current = true;
     try {
@@ -972,9 +1108,15 @@ export function usePlaybackActions() {
     } finally {
       playNextLockRef.current = false;
     }
-  }, [store, showToast, seekTo]);
+  }, [store, showToast, seekTo, sonos]);
 
   const toggleShuffle = useCallback(() => {
+    if (
+      sonos.isCasting() &&
+      (sonos.refusesWhileLoading() || sonos.refusesReorder())
+    ) {
+      return;
+    }
     const current = store.get(shuffleAtom);
     if (!current) {
       // Turning ON: save current queue as original, then shuffle
@@ -996,7 +1138,8 @@ export function usePlaybackActions() {
       store.set(originalQueueAtom, null);
       store.set(shuffleAtom, false);
     }
-  }, [store]);
+    if (sonos.isCasting()) void sonos.replaceUpcoming(store.get(queueAtom));
+  }, [store, sonos]);
 
   const setShuffledQueue = useCallback(
     (
@@ -1043,6 +1186,7 @@ export function usePlaybackActions() {
 
   const playFromQueue = useCallback(
     async (index: number) => {
+      if (sonos.isCasting()) return sonos.playIndex(index);
       const manual = store.get(manualQueueAtom);
       const queue = store.get(queueAtom);
       if (index < 0 || index >= manual.length + queue.length) return;
@@ -1080,7 +1224,7 @@ export function usePlaybackActions() {
       }
       await playTrack(track);
     },
-    [store, playTrack, showToast],
+    [store, playTrack, showToast, sonos],
   );
 
   const playFromSource = useCallback(
@@ -1167,13 +1311,17 @@ export function usePlaybackActions() {
     store.set(originalQueueAtom, null);
     store.set(playbackSourceAtom, null);
     store.set(contextSourceAtom, null);
-  }, [store]);
+    if (sonos.isCasting()) void sonos.replaceUpcoming([]);
+  }, [store, sonos]);
 
   return {
     playTrack,
     pauseTrack,
     resumeTrack,
     setVolume,
+    setMuted,
+    adjustVolume,
+    toggleMute,
     seekTo,
     addToQueue,
     playNextInQueue,

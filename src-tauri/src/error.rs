@@ -40,6 +40,10 @@ pub enum SoneError {
     /// Scrobbling service error.
     #[error("Scrobble error: {0}")]
     Scrobble(String),
+
+    /// Sonos discovery / SOAP control error.
+    #[error("Sonos error: {0}")]
+    Sonos(String),
 }
 
 impl SoneError {

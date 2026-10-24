@@ -747,6 +747,7 @@ function CompactTier({
   volume,
   bitPerfect,
   playbackSourceLabel,
+  playingOn,
   sendCommand,
   sendVolume,
   colors,
@@ -762,6 +763,7 @@ function CompactTier({
   volume: number;
   bitPerfect: boolean;
   playbackSourceLabel: { type: string; name: string } | null;
+  playingOn: string | null;
   sendCommand: (action: string, value?: number) => void;
   sendVolume: (vol: number) => void;
   colors: VibrantColors;
@@ -772,7 +774,9 @@ function CompactTier({
   const title = track ? getTrackDisplayTitle(track) : "";
   const artistName = track?.artist?.name ?? "";
   const [showVolume, setShowVolume] = useState(false);
-  const showPlayingFrom = containerHeight >= 130 && playbackSourceLabel;
+  const showPlayingFrom =
+    containerHeight >= 130 && !playingOn && playbackSourceLabel;
+  const showPlayingOn = containerHeight >= 130 && playingOn;
   const showCompactVolume = containerWidth >= 300;
   const showCompactShare = containerWidth >= 300;
 
@@ -809,6 +813,14 @@ function CompactTier({
               onClick={() => sendCommand("show-source")}
             >
               Playing from {playbackSourceLabel.name}
+            </span>
+          )}
+          {showPlayingOn && (
+            <span
+              className="text-[12px] truncate mt-0.5 w-fit max-w-full"
+              style={{ color: colors.textMuted }}
+            >
+              {playingOn}
             </span>
           )}
         </div>
@@ -908,6 +920,7 @@ function FullTier({
   displayPosition,
   duration,
   playbackSourceLabel,
+  playingOn,
   sendCommand,
   sendVolume,
   colors,
@@ -923,6 +936,7 @@ function FullTier({
   displayPosition: number;
   duration: number;
   playbackSourceLabel: { type: string; name: string } | null;
+  playingOn: string | null;
   sendCommand: (action: string, value?: number) => void;
   sendVolume: (vol: number) => void;
   colors: VibrantColors;
@@ -990,6 +1004,14 @@ function FullTier({
               onClick={() => sendCommand("show-source")}
             >
               Playing from {playbackSourceLabel.name}
+            </span>
+          )}
+          {playingOn && (
+            <span
+              className="text-[12px] truncate mt-0.5 w-fit max-w-full"
+              style={{ color: colors.textMuted }}
+            >
+              {playingOn}
             </span>
           )}
         </div>
@@ -1106,6 +1128,7 @@ export default function MiniPlayer() {
             volume={state.volume}
             bitPerfect={state.bitPerfect}
             playbackSourceLabel={state.playbackSourceLabel}
+            playingOn={state.playingOn}
             sendCommand={sendCommand}
             sendVolume={sendVolume}
             colors={colors}
@@ -1127,6 +1150,7 @@ export default function MiniPlayer() {
             displayPosition={displayPosition}
             duration={state.duration}
             playbackSourceLabel={state.playbackSourceLabel}
+            playingOn={state.playingOn}
             sendCommand={sendCommand}
             sendVolume={sendVolume}
             colors={colors}

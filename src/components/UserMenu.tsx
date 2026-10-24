@@ -13,12 +13,13 @@ import {
 } from "lucide-react";
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { useAtom } from "jotai";
+import { useAtom, useAtomValue } from "jotai";
 import { useAuth } from "../hooks/useAuth";
 import {
   exclusiveModeAtom,
   bitPerfectAtom,
   exclusiveDeviceAtom,
+  playbackTargetAtom,
 } from "../atoms/playback";
 import { useToast } from "../contexts/ToastContext";
 import {
@@ -52,6 +53,7 @@ export default function UserMenu() {
   const [exclusiveMode, setExclusiveMode] = useAtom(exclusiveModeAtom);
   const [bitPerfect, setBitPerfect] = useAtom(bitPerfectAtom);
   const [exclusiveDevice, setExclusiveDevice] = useAtom(exclusiveDeviceAtom);
+  const casting = useAtomValue(playbackTargetAtom).type === "sonos";
   const [audioDevices, setAudioDevices] = useState<
     Array<{ id: string; name: string }>
   >([]);
@@ -263,6 +265,11 @@ export default function UserMenu() {
               <span className="flex-1 text-left">Bit-perfect</span>
               <Toggle on={bitPerfect} />
             </button>
+          )}
+          {casting && (
+            <p className="px-4 pb-1 pl-11 text-[11px] text-th-text-muted">
+              Applies to This computer only
+            </p>
           )}
 
           {/* ── Scrobbling ── */}

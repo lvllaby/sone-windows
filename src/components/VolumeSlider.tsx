@@ -1,8 +1,14 @@
 import { memo } from "react";
 import { useAtomValue } from "jotai";
 import { Volume2, VolumeX, Volume1 } from "lucide-react";
-import { volumeAtom, bitPerfectAtom } from "../atoms/playback";
+import {
+  volumeAtom,
+  bitPerfectAtom,
+  playbackTargetAtom,
+} from "../atoms/playback";
+import { sonosGroupVolumeAtom, sonosStateAtom } from "../atoms/sonos";
 import { usePlaybackActions } from "../hooks/usePlaybackActions";
+import { useHeldValue } from "../hooks/useHeldValue";
 
 interface VolumeSliderProps {
   /** Container width class (default "w-[120px]") */
@@ -19,14 +25,28 @@ const VolumeSlider = memo(function VolumeSlider({
   onDragEnd,
 }: VolumeSliderProps) {
   const volume = useAtomValue(volumeAtom);
-  const bitPerfect = useAtomValue(bitPerfectAtom);
-  const { setVolume } = usePlaybackActions();
+  const localBitPerfect = useAtomValue(bitPerfectAtom);
+  const casting = useAtomValue(playbackTargetAtom).type === "sonos";
+  const groupVolume = useAtomValue(sonosGroupVolumeAtom);
+  const groupMuted = useAtomValue(sonosStateAtom)?.muted ?? false;
+  const { setVolume, setMuted } = usePlaybackActions();
+  const held = useHeldValue(groupVolume);
 
-  const displayVolume = bitPerfect ? 1 : volume;
+  // Bit-perfect is a This computer setting; it doesn't apply to a Sonos group
+  const bitPerfect = localBitPerfect && !casting;
+  const displayVolume = bitPerfect
+    ? 1
+    : casting
+      ? groupMuted && !held.holding
+        ? 0
+        : held.value
+      : volume;
 
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (bitPerfect) return;
-    setVolume(parseFloat(e.target.value));
+    const next = parseFloat(e.target.value);
+    if (casting) held.change(next);
+    setVolume(next);
   };
 
   const VolumeIcon =
@@ -39,6 +59,10 @@ const VolumeSlider = memo(function VolumeSlider({
       <button
         onClick={() => {
           if (bitPerfect) return;
+          if (casting) {
+            setMuted(!groupMuted);
+            return;
+          }
           setVolume(volume > 0 ? 0 : 1);
         }}
         className={`flex-shrink-0 transition-colors duration-150 ${
@@ -60,6 +84,7 @@ const VolumeSlider = memo(function VolumeSlider({
           step="0.01"
           value={displayVolume}
           onChange={handleVolumeChange}
+          onPointerDown={casting ? held.grab : undefined}
           onMouseDown={
             isDraggingRef
               ? () => {

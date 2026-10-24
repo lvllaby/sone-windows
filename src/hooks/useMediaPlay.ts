@@ -1,4 +1,6 @@
 import { useCallback, useRef } from "react";
+import { useStore } from "jotai";
+import { playbackTargetAtom } from "../atoms/playback";
 import { usePlaybackActions } from "./usePlaybackActions";
 import { fetchMediaTracks } from "../api/tidal";
 import { isTrackUnavailable } from "../lib/trackAvailability";
@@ -39,6 +41,7 @@ function buildSource(item: MediaItemType, tracks: Track[]) {
 }
 
 export function useMediaPlay() {
+  const store = useStore();
   const { playTrack, setQueueTracks, playNext } = usePlaybackActions();
   const lastInvokeRef = useRef(0);
 
@@ -57,6 +60,15 @@ export function useMediaPlay() {
           const source = buildSource(item, tracks);
           setQueueTracks(rest, source ? { source } : undefined);
           if (isTrackUnavailable(first)) {
+            if (store.get(playbackTargetAtom).type === "sonos") {
+              // Casting: Next would skip on the old Sonos queue. Start the first
+              // playable track instead, which loads the new queue.
+              const idx = tracks.findIndex((t) => !isTrackUnavailable(t));
+              if (idx < 0) return;
+              setQueueTracks(tracks.slice(idx + 1), source ? { source } : undefined);
+              await playTrack(tracks[idx]);
+              return;
+            }
             // First track flagged unavailable — let the skip-loop pull the next playable.
             await playNext({ explicit: true });
             return;
@@ -70,6 +82,6 @@ export function useMediaPlay() {
         console.error("Failed to play media:", err);
       }
     },
-    [playTrack, setQueueTracks, playNext],
+    [store, playTrack, setQueueTracks, playNext],
   );
 }

@@ -40,7 +40,6 @@ import {
   queueAtom,
   historyAtom,
   volumeAtom,
-  preMuteVolumeAtom,
   exclusiveModeAtom,
   bitPerfectAtom,
   exclusiveDeviceAtom,
@@ -51,6 +50,7 @@ import {
   shuffleAtom,
   repeatAtom,
   streamInfoAtom,
+  playbackTargetAtom,
 } from "../atoms/playback";
 import { decorationsAtom, drawerOpenAtom, maximizedPlayerAtom } from "../atoms/ui";
 import { proxySettingsAtom, type ProxySettings } from "../atoms/proxy";
@@ -59,6 +59,8 @@ import { proxySettingsAtom, type ProxySettings } from "../atoms/proxy";
 import { usePlaybackActions } from "../hooks/usePlaybackActions";
 import { useFavorites } from "../hooks/useFavorites";
 import { useShortcuts } from "../hooks/useShortcuts";
+import { useSonosSync } from "../hooks/useSonosSync";
+import { useSonosAutoAttach } from "../hooks/useSonosHandoff";
 import { useToast } from "../contexts/ToastContext";
 import {
   checkNetworkError,
@@ -91,7 +93,6 @@ import { ensureQid, advanceCounterPast } from "../lib/qid";
 import {
   initPositionInterpolator,
   destroyPositionInterpolator,
-  notifySeek,
   getInterpolatedPosition,
 } from "../lib/playbackPosition";
 
@@ -103,8 +104,9 @@ type RuntimeTrackFields = {
   _contextFrom?: unknown;
 };
 
+// Ids <= 0 are Sonos placeholders (non-TIDAL items mirrored while casting)
 function isValidTrack(t: unknown): t is Track {
-  return !!t && typeof (t as Track).id === "number";
+  return !!t && typeof (t as Track).id === "number" && (t as Track).id > 0;
 }
 
 function stripRuntimeTrackFields(track: Track): Track {
@@ -152,13 +154,15 @@ export function AppInitializer() {
   const setContextSource = useSetAtom(contextSourceAtom);
 
   // ---- Stable playback actions (no subscriptions) ----
-  const { playTrack, playNext, playPrevious, pauseTrack, resumeTrack, setVolume, toggleShuffle, seekTo } =
+  const { playTrack, playNext, playPrevious, pauseTrack, resumeTrack, setVolume, adjustVolume, toggleMute, toggleShuffle, seekTo } =
     usePlaybackActions();
   const { addFavoriteTrack, removeFavoriteTrack, favoriteTrackIds } =
     useFavorites();
   const setDrawerOpen = useSetAtom(drawerOpenAtom);
   const setDecorations = useSetAtom(decorationsAtom);
   const { showToast } = useToast();
+  useSonosSync();
+  useSonosAutoAttach();
 
   // ---- Store for one-time reads (volume, queue, history, etc.) — no subscription ----
   const store = useStore();
@@ -447,23 +451,21 @@ export function AppInitializer() {
     let latestJson: string | null = null;
 
     const restoreSnapshot = (raw: string) => {
+      // Already attached to a Sonos group: its queue is mirrored instead
+      if (store.get(playbackTargetAtom).type === "sonos") return;
       const parsed = JSON.parse(raw) as Partial<PlaybackSnapshot>;
 
       const restoredCurrentTrack =
-        parsed.currentTrack && typeof parsed.currentTrack.id === "number"
+        parsed.currentTrack && isValidTrack(parsed.currentTrack)
           ? stripRuntimeTrackFields(parsed.currentTrack as Track)
           : null;
 
       const restoredQueue = Array.isArray(parsed.queue)
-        ? parsed.queue
-            .filter((t): t is Track => !!t && typeof t.id === "number")
-            .map(stripRuntimeTrackFields)
+        ? parsed.queue.filter(isValidTrack).map(stripRuntimeTrackFields)
         : [];
 
       const restoredHistory = Array.isArray(parsed.history)
-        ? parsed.history
-            .filter((t): t is Track => !!t && typeof t.id === "number")
-            .map(stripRuntimeTrackFields)
+        ? parsed.history.filter(isValidTrack).map(stripRuntimeTrackFields)
         : [];
       const cappedHistory =
         restoredHistory.length > MAX_HISTORY_TRACKS
@@ -815,6 +817,11 @@ export function AppInitializer() {
       }
     });
     const unlistenMprisStop = listen("mpris:stop", () => {
+      // Casting: stopping means pausing the group (the local pipeline is idle)
+      if (store.get(playbackTargetAtom).type === "sonos") {
+        pauseTrack();
+        return;
+      }
       invoke("stop_track").catch(() => {});
       store.set(isPlayingAtom, false);
     });
@@ -940,8 +947,8 @@ export function AppInitializer() {
       try {
         const current = await invoke<number>("get_playback_position");
         const newPos = Math.max(0, current + event.payload);
-        await invoke("seek_track", { positionSecs: newPos });
-        notifySeek(newPos);
+        // seekTo does seek_track + notifySeek locally, and reaches Sonos while casting
+        await seekTo(newPos);
       } catch {}
     });
     const unlistenVolume = listen<number>("mpris:set-volume", (event) => {
@@ -1007,17 +1014,10 @@ export function AppInitializer() {
     },
     nextTrack: () => playNext({ explicit: true }),
     prevTrack: () => playPrevious(),
-    volumeUp: () => setVolume(Math.min(1.0, store.get(volumeAtom) + 0.1)),
-    volumeDown: () => setVolume(Math.max(0.0, store.get(volumeAtom) - 0.1)),
-    muteToggle: () => {
-      const vol = store.get(volumeAtom);
-      if (vol > 0) {
-        store.set(preMuteVolumeAtom, vol);
-        setVolume(0);
-      } else {
-        setVolume(store.get(preMuteVolumeAtom) || 0.5);
-      }
-    },
+    // Casting-aware: the Sonos group's volume / mute while casting
+    volumeUp: () => adjustVolume(0.1),
+    volumeDown: () => adjustVolume(-0.1),
+    muteToggle: () => toggleMute(),
     likeToggle: () => {
       const track = store.get(currentTrackAtom);
       if (!track) return;

@@ -9,8 +9,10 @@ import {
   playbackSourceAtom,
   contextSourceAtom,
   bitPerfectAtom,
+  playbackTargetAtom,
 } from "../atoms/playback";
 import { favoriteTrackIdsAtom } from "../atoms/favorites";
+import { sonosGroupVolumeAtom, sonosPlayingOnAtom } from "../atoms/sonos";
 import { miniplayerOpenAtom } from "../atoms/ui";
 import { getInterpolatedPosition } from "../lib/playbackPosition";
 import { usePlaybackActions } from "./usePlaybackActions";
@@ -41,6 +43,8 @@ export interface MiniplayerState {
   volume: number;
   playbackSourceLabel: { type: string; id: string | number; name: string } | null;
   bitPerfect: boolean;
+  /** "Playing on <group>" while casting to Sonos. */
+  playingOn: string | null;
   accentColor: string;
   error?: string;
 }
@@ -57,7 +61,11 @@ export function useMiniplayerEmitter() {
     const isPlaying = store.get(isPlayingAtom);
     const shuffle = store.get(shuffleAtom);
     const repeat = store.get(repeatAtom);
-    const volume = store.get(volumeAtom);
+    // The effective volume: the Sonos group's while casting (set-volume routes there too)
+    const volume =
+      store.get(playbackTargetAtom).type === "sonos"
+        ? store.get(sonosGroupVolumeAtom)
+        : store.get(volumeAtom);
     const favoriteIds = store.get(favoriteTrackIdsAtom);
     const source = store.get(contextSourceAtom) || store.get(playbackSourceAtom);
 
@@ -99,6 +107,7 @@ export function useMiniplayerEmitter() {
         ? { type: source.type, id: source.id, name: source.name }
         : null,
       bitPerfect: store.get(bitPerfectAtom),
+      playingOn: store.get(sonosPlayingOnAtom),
       accentColor,
       error: lastErrorRef.current,
     };
@@ -126,10 +135,12 @@ export function useMiniplayerEmitter() {
       shuffleAtom,
       repeatAtom,
       volumeAtom,
+      sonosGroupVolumeAtom,
       favoriteTrackIdsAtom,
       playbackSourceAtom,
       contextSourceAtom,
       bitPerfectAtom,
+      sonosPlayingOnAtom,
     ];
 
     const unsubs = atoms.map((a) => store.sub(a, scheduleEmit));
